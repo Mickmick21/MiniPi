@@ -23,5 +23,6 @@ Raspberry Pi
 
 For Minitels, any Minitel with a DIN port *should* work.
 
-##Installation
+## Installation
+
 TODO: Do this.
