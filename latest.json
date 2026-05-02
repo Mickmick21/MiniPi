@@ -1,0 +1,4 @@
+{
+  "doAptBeforeUpdate": true,
+  "updateScript": "https://mick-serv.duckdns.org/assets/MiniPi/update.py"
+}
