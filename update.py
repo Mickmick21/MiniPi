@@ -5,8 +5,8 @@ import os
 import shutil
 import time
 
-URL = "https://mick-serv.duckdns.org/assets/MiniPi/minipi.py"
-CHANGELOG_URL = "https://mick-serv.duckdns.org/assets/MiniPi/changelog.txt"
+URL = "https://raw.githubusercontent.com/Mickmick21/MiniPi/refs/heads/main/minipi.py"
+CHANGELOG_URL = "https://raw.githubusercontent.com/Mickmick21/MiniPi/refs/heads/main/new.txt"
 
 TARGET = "/home/minitel/minipi.py"
 TMP = "/tmp/minipi_new.py"
