@@ -40,7 +40,7 @@ ser = serial.Serial(
 # Couleurs.
 
 # Vitesses disponibles pour la négociation de vitesse.
-VITESSES = [75, 300, 1200, 4800]
+VITESSES = [75, 300, 1200, 4800, 9600]
 
 
 def _build_exchange_byte(tx_baud: int, rx_baud: int) -> int:
@@ -113,9 +113,7 @@ BLANC = 7
 
 
 def ansi_apply(text: str, draw_char):
-    """
-    ansi_to_minitel mais en streaming.
-    """
+    """ansi_to_minitel mais en streaming."""
 
     fg = BLANC
     bg = NOIR
@@ -154,52 +152,6 @@ def ansi_apply(text: str, draw_char):
 
         draw_char(text[i], fg, bg)
         i += 1
-
-
-def ansi_to_minitel(text: str):
-    """
-    Convertion basique de codes couleurs ANSI vers des couleurs Minitel.
-    Support:
-      30–37 (fg)
-      40–47 (bg)
-      0 reset
-    """
-    parts = ANSI_RE.split(text)
-
-    out = []
-    i = 0
-
-    while i < len(parts):
-        chunk = parts[i]
-        out.append(chunk)
-        i += 1
-
-        if i >= len(parts):
-            break
-
-        codes = parts[i]
-        i += 1
-
-        for code in codes.split(";"):
-            if not code:
-                continue
-
-            c = int(code)
-
-            # RESET
-            if c == 0:
-                color(BLANC)
-                bgcolor(NOIR)
-
-            # FG
-            elif 30 <= c <= 37:
-                color(c - 30)
-
-            # BG
-            elif 40 <= c <= 47:
-                bgcolor(c - 40)
-
-    return "".join(out)
 
 
 # Codes de touches fonctions. (SEP + chr(64+code))
@@ -754,17 +706,27 @@ def app_shell():
                 def print_stream(text):
                     nonlocal output_line
 
-                    text = ansi_to_minitel(text)
+                    def draw_char(ch, fg, bg):
+                        nonlocal output_line
+                        if ch == "\n":
+                            output_line += 1
+                            if output_line > 22:
+                                output_line = 4
+                                clear()
+                                header("Terminal", bg=VERT, fg=NOIR)
+                            pos(output_line, 1)
+                            return
+                        color(fg)
+                        bgcolor(bg)
+                        send(ch)
 
-                    for line in text.splitlines():
-                        if output_line > 22:
-                            output_line = 4
-                            clear()
-                            header("Terminal", bg=VERT, fg=NOIR)
+                    if output_line > 22:
+                        output_line = 4
+                        clear()
+                        header("Terminal", bg=VERT, fg=NOIR)
+                    pos(output_line, 1)
 
-                        pos(output_line, 1)
-                        send(line[:WIDTH])
-                        output_line += 1
+                    ansi_apply(text, draw_char)
 
                 try:
                     cursor_y = output_line
