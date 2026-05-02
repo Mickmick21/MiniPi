@@ -11,6 +11,7 @@ import subprocess
 import socket
 import os
 import urllib.request
+from urllib.parse import unquote_to_bytes
 import json
 import tempfile
 import threading
@@ -248,20 +249,15 @@ def sys_run_interactive(cmd, output_callback, input_callback=None):
 # Sortie Low-level
 
 
-def _write_bytes(data: bytes):
-    """Envoyer des données brutes."""
-    ser.write(data)
-
-
 def send(text: str):
     """Envoyer du texte, avec convertition des accents."""
     text = _accents(text)
-    _write_bytes(text.encode("latin-1", errors="ignore"))
+    ser.write(text.encode("latin-1", errors="ignore"))
 
 
 def sendchr(code: int):
     """Envoyer un charactère."""
-    _write_bytes(bytes([code]))
+    ser.write(bytes([code]))
 
 
 def sendesc(seq: str):
@@ -508,6 +504,14 @@ def read_input(
                 bip()
 
 
+def wait_sommaire():
+    """Bloquer jusqu'à ce que l'utilisateur appuie sur SOMMAIRE."""
+    while True:
+        ev = read_event()
+        if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
+            return
+
+
 # Interface utilisateur
 
 WIDTH = 40
@@ -566,11 +570,9 @@ def get_hostname() -> str:
 def get_ip() -> str:
     """Retourne l'adresse IP du Rapberry Pi."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
     except OSError:
         return "Pas d'internet"
 
@@ -800,10 +802,7 @@ def ws_closed_screen():
 
     footer("SOMMAIRE pour retour", bg=ROUGE, fg=BLANC)
 
-    while True:
-        ev = read_event()
-        if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-            break
+    wait_sommaire()
 
 
 def ws_connect(url):
@@ -818,9 +817,9 @@ def ws_connect(url):
         ws_log("RX message:", repr(message))
 
         if isinstance(message, str):
-            _write_bytes(message.encode("latin-1", errors="ignore"))
+            ser.write(message.encode("latin-1", errors="ignore"))
         else:
-            _write_bytes(message)
+            ser.write(message)
 
     def on_open(_):
         global WS_STATE
@@ -841,7 +840,7 @@ def ws_connect(url):
     WS = websocket.WebSocketApp(
         url,
         header=[
-            "User-Agent: {APP_UA}",
+            f"User-Agent: {APP_UA}",
         ],
         on_message=on_message,
         on_open=on_open,
@@ -859,21 +858,9 @@ def ws_connect(url):
 
 def ws_send_raw(data: str):
     """Convertit %XX en octets et envoi."""
-    i = 0
-    out = bytearray()
-
-    while i < len(data):
-        if data[i] == "%" and i + 2 < len(data):
-            out.append(int(data[i + 1 : i + 3], 16))
-            i += 3
-            continue
-
-        out.append(ord(data[i]))
-        i += 1
-
+    payload = unquote_to_bytes(data)
     if WS:
-        ws_log("TX RAW:", out)
-        WS.send(out)
+        WS.send(payload)
 
 
 def ws_send(data: str):
@@ -1156,10 +1143,7 @@ def app_config():
             send(first_line)
 
         footer("SOMMAIRE pour retourner", bg=BLEU, fg=BLANC)
-        while True:
-            ev = read_event()
-            if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                break
+        wait_sommaire()
 
     def do_upgrade():
         """Mise à jour système."""
@@ -1202,10 +1186,7 @@ def app_config():
             )
             print_line(str(e))
             footer("SOMMAIRE pour retour", bg=ROUGE, fg=BLANC)
-            while True:
-                ev = read_event()
-                if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                    return
+            wait_sommaire()
 
         # Mise à jour via APT
         if cfg.get("doAptBeforeUpdate", False):
@@ -1269,94 +1250,61 @@ def app_config():
         textbg(2, 1, "Mise à jour terminée !".ljust(WIDTH), VERT, NOIR)
         footer("SOMMAIRE pour retourner", bg=VERT, fg=NOIR)
 
-        while True:
-            ev = read_event()
-            if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                break
+        wait_sommaire()
 
     def show_info():
-        """Infos systèmes."""
+        """Infos système."""
         clear()
         header("Infos système", bg=CYAN, fg=NOIR)
-        textbg(2, 1, "Etat de la machine".ljust(WIDTH), CYAN, NOIR)
+        textbg(2, 1, "État de la machine".ljust(WIDTH), CYAN, NOIR)
 
-        pos(4, 3)
-        color(CYAN)
-        send("Nom    : ")
-        color(BLANC)
-        send(get_hostname())
-        pos(5, 3)
-        color(CYAN)
-        send("IP     : ")
-        color(BLANC)
-        send(get_ip())
-        pos(6, 3)
-        color(CYAN)
-        send("Uptime : ")
-        color(BLANC)
-        send(get_uptime())
-        pos(7, 3)
-        color(CYAN)
-        send("Arch   : ")
-        color(BLANC)
-        send(sys_run("uname -m").strip())
-
-        # Température du Processeur
+        # Température CPU
         try:
             with open("/sys/class/thermal/thermal_zone0/temp", encoding="utf-8") as f:
-                temp = int(f.read().strip()) // 1000
-            temp_str = f"{temp}°C"
+                temp = f"{int(f.read().strip()) // 1000}°C"
         except Exception:
-            temp_str = "?"
-        pos(8, 3)
-        color(CYAN)
-        send("Temp   : ")
-        color(BLANC)
-        send(temp_str)
+            temp = "?"
 
-        # Utilisation du disque.
-        disk_out = sys_run("df -h /").strip().splitlines()
-        disk_cols = disk_out[-1].split() if disk_out else []
+        # Utilisation disque
+        disk_cols = sys_run("df -h /").strip().splitlines()[-1].split()
         disk = (
             f"{disk_cols[2]}/{disk_cols[1]} ({disk_cols[4]})"
             if len(disk_cols) >= 5
             else "?"
         )
-        pos(9, 3)
-        color(CYAN)
-        send("Disque : ")
-        color(BLANC)
-        send(disk)
 
-        # RAM totale et libre.
-        mem_out = sys_run("free -h").strip().splitlines()
-        mem_cols = mem_out[1].split() if len(mem_out) > 1 else []
-        mem = f"{mem_cols[2]}/{mem_cols[1]}" if len(mem_cols) >= 3 else "?"
-        pos(10, 3)
-        color(CYAN)
-        send("RAM    : ")
-        color(BLANC)
-        send(mem)
+        # RAM
+        mem_cols = sys_run("free -h").strip().splitlines()
+        mem = (
+            f"{mem_cols[1].split()[2]}/{mem_cols[1].split()[1]}"
+            if len(mem_cols) > 1
+            else "?"
+        )
 
-        # Version du script
-        pos(11, 3)
-        color(CYAN)
-        send("Version: ")
-        color(BLANC)
-        send(APP_VERSION)
+        infos = [
+            ("Nom    ", get_hostname()),
+            ("IP     ", get_ip()),
+            ("Uptime ", get_uptime()),
+            ("Arch   ", sys_run("uname -m").strip()),
+            ("Temp   ", temp),
+            ("Disque ", disk),
+            ("RAM    ", mem),
+            ("Version", APP_VERSION),
+        ]
+
+        def info_row(ligne, label, value):
+            pos(ligne, 3)
+            color(CYAN)
+            send(f"{label}: ")
+            color(BLANC)
+            send(value)
+
+        for i, (label, value) in enumerate(infos):
+            info_row(4 + i, label, value)
 
         color(BLANC)
         footer("SOMMAIRE pour retourner", bg=CYAN, fg=NOIR)
-        while True:
-            ev = read_event()
-            if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                break
-
-    # Dessiner le menu et les options.
-    draw_static()
-    for i in range(len(options)):
-        update_row(i, i == selected)
-    cursor(False)
+        wait_sommaire()
 
     # Vitesse baudrate
     def edit_vitesse():
@@ -1448,8 +1396,19 @@ def app_config():
                 elif val == KEY_SOMMAIRE:
                     break
 
+    def do_reboot():
+        clear()
+        status("Redémarrage...", bg=ROUGE, fg=BLANC, delay=-1)
+        sys_run("reboot")
+
+    # Dessiner le menu et les options.
+    draw_static()
+    for i in range(len(options)):
+        update_row(i, i == selected)
+    cursor(False)
+
     # Boucle principale.
-    actions = [edit_hostname, edit_wifi, edit_vitesse, do_upgrade, show_info, None]
+    actions = [edit_hostname, edit_wifi, edit_vitesse, do_upgrade, show_info, do_reboot]
 
     while True:
         ev = read_event()
@@ -1471,12 +1430,7 @@ def app_config():
                 update_row(selected, True)
 
             elif val == KEY_ENVOI:
-                if selected == 5:
-                    # Redémarrer
-                    clear()
-                    status("Redémarrage...", bg=ROUGE, fg=BLANC, delay=-1)
-                    sys_run("reboot")
-                elif actions[selected]:
+                if actions[selected]:
                     actions[selected]()
                     draw_static()
                     for i in range(len(options)):
