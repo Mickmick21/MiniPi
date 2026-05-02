@@ -287,7 +287,7 @@ def bip():
     sendchr(7)
 
 def eol(ligne: int, colonne: int = 1):
-    """Éffacer de (ligne, colonne) à la fin de la ligne."""
+    """Effacer de (ligne, colonne) à la fin de la ligne."""
     pos(ligne, colonne)
     sendchr(24)   # CAN
 
@@ -1173,7 +1173,7 @@ def app_config():
         try:
             textbg(2, 1, "Téléchargement de la config...".ljust(WIDTH), VERT, NOIR)
             with urllib.request.urlopen(
-                "https://mick-serv.duckdns.org/assets/MiniPi/latest.json",
+                "https://raw.githubusercontent.com/Mickmick21/MiniPi/refs/heads/main/latest.json",
                 timeout=5
             ) as r:
                 cfg = json.loads(r.read().decode())
