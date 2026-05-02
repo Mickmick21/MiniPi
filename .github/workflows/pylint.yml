@@ -30,7 +30,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pylint
+          pip install websocket-client
+          pip install pyserial
 
       - name: Lint
         run: |
-          pylint $(git ls-files '*.py')
+          pylint --jobs=0 --output-format=colorized --score=y --fail-under=8 $(git ls-files '*.py')
+

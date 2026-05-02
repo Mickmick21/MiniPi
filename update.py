@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+Script de mise à jour MiniPi
+"""
 
 import urllib.request
 import os
@@ -13,14 +16,20 @@ TMP = "/tmp/minipi_new.py"
 
 
 def fetch_changelog():
+    """
+    Télécharger les nouveautés.
+    """
     try:
         with urllib.request.urlopen(CHANGELOG_URL, timeout=5) as r:
             return r.read().decode("utf-8", errors="replace")
-    except Exception as e:
+    except OSError as e:
         return f"(Impossible de récupérer le changelog: {e})"
 
 
 def main():
+    """
+    Fonction de Mise à Jour.
+    """
     print("=== Mise à jour MiniPi ===\n")
 
     # Afficher les nouveautés
