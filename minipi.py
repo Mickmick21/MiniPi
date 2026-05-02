@@ -420,14 +420,11 @@ def read_event():
         debug(ev, raw)
         return ev
 
-    try:
-        ch = c.decode('latin-1')
-        if ch >= ' ':
-            ev = ("CHAR", ch)
-            debug(ev, raw)
-            return ev
-    except Exception:
-        pass
+    ch = c.decode('latin-1')
+    if ch >= ' ':
+        ev = ("CHAR", ch)
+        debug(ev, raw)
+        return ev
 
     debug(None, raw)
     return None
@@ -525,33 +522,39 @@ def box(top: int, left: int, height: int, width: int,
 # Infos système minifiés (utilisé par Accueil et Configuration)
 
 def get_hostname() -> str:
-    try:
-        return socket.gethostname()
-    except Exception:
-        return '?'
+    """
+    Retourne le hostname.
+    """
+    return socket.gethostname()
 
 def get_ip() -> str:
+    """
+    Retourne l'adresse IP du Rapberry Pi.
+    """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('8.8.8.8', 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:
+    except OSError:
         return 'Pas d\'internet'
 
 def get_uptime() -> str:
-    try:
-        with open('/proc/uptime') as f:
-            secs = float(f.read().split()[0])
-        h, m = divmod(int(secs) // 60, 60)
-        return f'{h}h{m:02d}m'
-    except Exception:
-        return '?'
+    """
+    Retourne le temps que le Raspberry Pi est allumé.
+    """
+    with open('/proc/uptime') as f:
+        secs = float(f.read().split()[0])
+    h, m = divmod(int(secs) // 60, 60)
+    return f'{h}h{m:02d}m'
 
 # Terminal
 
 def app_shell():
+    """
+    Application shell.
+    """
     clear()
     header('Terminal', bg=VERT, fg=NOIR)
     textbg(2, 1, 'SOMMAIRE: quitter  SUITE/RETOUR: historique'.ljust(WIDTH), VERT, NOIR)
@@ -736,9 +739,15 @@ def app_shell():
 # Websocket
 
 def mp_key(code: str):
+    """
+    Touche fonction (Guide, ENVOI, Suite...).
+    """
     return "%13" + code
 
 def ws_log(*args):
+    """
+    Fonction log WebSocket.
+    """
     try:
         msg = "[WS] " + " ".join(str(a) for a in args)
         print(msg)
@@ -746,6 +755,9 @@ def ws_log(*args):
         pass
 
 def ws_closed_screen():
+    """
+    Écran Connexion interrompue.
+    """
     clear()
     header("WebSocket", bg=ROUGE, fg=BLANC)
 
@@ -762,6 +774,9 @@ def ws_closed_screen():
             break
 
 def ws_connect(url):
+    """
+    Connexion à un serveur WebSocket Minitel.
+    """
     global WS, WS_RUNNING, WS_URL, WS_STATE
 
     WS_URL = url
@@ -773,13 +788,10 @@ def ws_connect(url):
     def on_message(ws, message):
         ws_log("RX message:", repr(message))
 
-        try:
-            if isinstance(message, str):
-                _write_bytes(message.encode('latin-1', errors='ignore'))
-            else:
-                _write_bytes(message)
-        except Exception as e:
-            ws_log("DISPLAY ERROR:", e)
+        if isinstance(message, str):
+            _write_bytes(message.encode('latin-1', errors='ignore'))
+        else:
+            _write_bytes(message)
 
     def on_open(ws):
         global WS_STATE
@@ -811,22 +823,18 @@ def ws_connect(url):
     )
 
     def runner():
-        try:
-            ws_log("Thread started")
-            WS.run_forever(
-                ping_interval=0,
-                ping_timeout=10
-            )
-        except Exception as e:
-            ws_log("FATAL WS THREAD ERROR:", e)
+        ws_log("Thread started")
+        WS.run_forever(
+            ping_interval=0,
+            ping_timeout=10
+        )
 
     t = threading.Thread(target=runner, daemon=True)
     t.start()
 
 def ws_send_raw(data: str):
     """
-    Convertit %XX en octets.
-    Uniquement pour le transport WebSocket.
+    Convertit %XX en octets et envoi.
     """
     i = 0
     out = bytearray()
@@ -844,24 +852,24 @@ def ws_send_raw(data: str):
         i += 1
 
     if WS:
-        try:
-            ws_log("TX RAW:", out)
-            WS.send(out)
-        except Exception as e:
-            ws_log("SEND ERROR:", e)
+        ws_log("TX RAW:", out)
+        WS.send(out)
 
 def ws_send(data: str):
+    """
+    Envoi de données texte.
+    """
     global WS
     if not WS:
         ws_log("WS not connected")
         return
-    try:
-        ws_log("TX:", repr(data))
-        WS.send(data)
-    except Exception as e:
-        ws_log("SEND ERROR:", e)
+    ws_log("TX:", repr(data))
+    WS.send(data)
 
 def ws_handle_input(event):
+    """
+    Détecter et envoyer les touches.
+    """
     et, val = event
 
     if et == "CHAR":
@@ -899,6 +907,9 @@ def ws_handle_input(event):
         ws_send_raw(mp_key("I"))   # Connexion / Fin
 
 def app_websocket():
+    """
+    Application Websocket.
+    """
     global WS, WS_RUNNING, WS_URL, WS_STATE
     clear()
     header('WebSocket', bg=MAGENTA, fg=BLANC)
@@ -961,13 +972,10 @@ def app_websocket():
 
 # Configuration
 
-_CONFIG_ITEMS = [
-    ('Wi-Fi',      None),
-    ('Nom d\'hote',   None),
-    ('Identifiants et SSH', None),
-]
-
 def app_config():
+    """
+    Application Configuration.
+    """
     cfg = load_config()
 
     options = [
@@ -1149,8 +1157,10 @@ def app_config():
             if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
                 break
 
-    # Mise à jour du système.
     def do_upgrade():
+        """
+        Mise à jour système.
+        """
 
         clear()
         header("Mise à jour", bg=VERT, fg=NOIR)
@@ -1258,16 +1268,34 @@ def app_config():
             if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
                 break
 
-    # Infos systèmes (Machine, pas du Minitel).
     def show_info():
+        """
+        Infos systèmes.
+        """
         clear()
         header("Infos système", bg=CYAN, fg=NOIR)
         textbg(2, 1, "Etat de la machine".ljust(WIDTH), CYAN, NOIR)
 
-        pos(4, 3);  color(CYAN);  send("Nom    : "); color(BLANC); send(get_hostname())
-        pos(5, 3);  color(CYAN);  send("IP     : "); color(BLANC); send(get_ip())
-        pos(6, 3);  color(CYAN);  send("Uptime : "); color(BLANC); send(get_uptime())
-        pos(7, 3);  color(CYAN);  send("Arch   : "); color(BLANC); send(sys_run("uname -m").strip())
+        pos(4, 3)
+        color(CYAN)
+        send("Nom    : ")
+        color(BLANC)
+        send(get_hostname())
+        pos(5, 3)
+        color(CYAN)
+        send("IP     : ")
+        color(BLANC)
+        send(get_ip())
+        pos(6, 3)
+        color(CYAN)
+        send("Uptime : ")
+        color(BLANC)
+        send(get_uptime())
+        pos(7, 3)
+        color(CYAN)
+        send("Arch   : ")
+        color(BLANC)
+        send(sys_run("uname -m").strip())
 
         # Température du Processeur
         try:
@@ -1575,14 +1603,6 @@ if __name__ == '__main__':
             type(e).__name__,
             str(e),
             ["Continuer", "Retour menu principal"]
-        )
-
-    except Exception as e:
-        action = fatal_error(
-            "ERREUR FATALE",
-            type(e).__name__,
-            str(e),
-            ["Continuer", "Redémarrer le script", "Retour au menu principal"]
         )
 
     # Actions.
