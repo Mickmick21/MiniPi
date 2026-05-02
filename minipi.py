@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-# MiniPi - Minitel interface for Raspberry Pi
-# GPIO UART (ttyAMA0) @ 1200 baud, 7E1
-# (C) 2026 Mickmick.bin - GNU General Public License v3.0
-# License available at https://choosealicense.com/licenses/gpl-3.0/
+""" 
+MiniPi - Minitel interface for Raspberry Pi
+GPIO UART (ttyAMA0) @ 1200 baud, 7E1
+(C) 2026 Mickmick.bin - GNU General Public License v3.0
+License available at https://choosealicense.com/licenses/gpl-3.0/
+"""
+
 
 import time
 import subprocess
@@ -161,6 +164,9 @@ CONFIG_FILE = "/etc/minipi.conf"
 
 
 def load_config():
+    """
+    Charger la configuration.
+    """
     cfg = {}
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -175,6 +181,9 @@ def load_config():
 
 
 def save_config(cfg):
+    """
+    Sauvegarder la configuration.
+    """
     with open(CONFIG_FILE, "w") as f:
         for k, v in cfg.items():
             f.write(f"{k}={v}\n")
@@ -188,7 +197,7 @@ def sys_run(cmd):
         ).decode(errors="ignore")
     except Exception as e:
         return str(e)
-    
+
 def sys_run_interactive(cmd, output_callback, input_callback=None):
     """
     Executer une commande dans un pseudo-terminal et streamer la sortie.
@@ -311,7 +320,7 @@ def hline(ligne: int, colonne: int, width: int, char: str = ' '):
     pos(ligne, colonne)
     fill(char, width)
 
-# Conversion des accents, STUM 2.3.1 p.22 
+# Conversion des accents, STUM 2.3.1 p.22
 
 def _accents(text: str) -> str:
     replacements = [
@@ -1320,7 +1329,7 @@ def app_config():
                 update_row(selected, True)
 
             elif val == KEY_ENVOI:
-                if selected == 4:  
+                if selected == 4:
                     # Redémarrer
                     status("Redemarrage...", bg=ROUGE, fg=BLANC, delay=1.0)
                     sys_run("reboot")
