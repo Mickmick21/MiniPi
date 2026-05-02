@@ -6,7 +6,6 @@ GPIO UART (ttyAMA0) @ 1200 baud, 7E1
 License available at https://choosealicense.com/licenses/gpl-3.0/
 """
 
-
 import time
 import subprocess
 import socket
@@ -162,9 +161,7 @@ CONFIG_FILE = "/etc/minipi.conf"
 
 
 def load_config():
-    """
-    Charger la configuration.
-    """
+    """Charger la configuration."""
     cfg = {}
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -179,17 +176,13 @@ def load_config():
 
 
 def save_config(cfg):
-    """
-    Sauvegarder la configuration.
-    """
+    """Sauvegarder la configuration."""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         for k, v in cfg.items():
             f.write(f"{k}={v}\n")
 
 def sys_run(cmd):
-    """
-    Executer une commande.
-    """
+    """Executer une commande."""
     try:
         return subprocess.check_output(
             cmd,
@@ -484,9 +477,7 @@ def read_input(ligne: int, colonne: int, longueur: int,
 WIDTH = 40
 
 def textbg(ligne: int, colonne: int, text: str, bg: int, fg: int = BLANC):
-    """
-    Écrire du texte avec une couleur de fond sur une seule ligne.
-    """
+    """Écrire du texte avec une couleur de fond sur une seule ligne."""
     pos(ligne, colonne)
     sendesc(chr(80 + bg))
     sendesc(chr(64 + fg))
@@ -524,15 +515,11 @@ def box(top: int, left: int, height: int, width: int,
 # Infos système minifiés (utilisé par Accueil et Configuration)
 
 def get_hostname() -> str:
-    """
-    Retourne le hostname.
-    """
+    """Retourne le hostname."""
     return socket.gethostname()
 
 def get_ip() -> str:
-    """
-    Retourne l'adresse IP du Rapberry Pi.
-    """
+    """Retourne l'adresse IP du Rapberry Pi."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('8.8.8.8', 80))
@@ -543,9 +530,7 @@ def get_ip() -> str:
         return 'Pas d\'internet'
 
 def get_uptime() -> str:
-    """
-    Retourne le temps que le Raspberry Pi est allumé.
-    """
+    """Retourne le temps que le Raspberry Pi est allumé."""
     with open('/proc/uptime', encoding="utf-8") as f:
         secs = float(f.read().split()[0])
     h, m = divmod(int(secs) // 60, 60)
@@ -554,9 +539,7 @@ def get_uptime() -> str:
 # Terminal
 
 def app_shell():
-    """
-    Application shell.
-    """
+    """Application shell."""
     clear()
     header('Terminal', bg=VERT, fg=NOIR)
     textbg(2, 1, 'SOMMAIRE: quitter  SUITE/RETOUR: historique'.ljust(WIDTH), VERT, NOIR)
@@ -736,22 +719,16 @@ def app_shell():
 # Websocket
 
 def mp_key(code: str):
-    """
-    Touche fonction (Guide, ENVOI, Suite...).
-    """
+    """Touche fonction (Guide, ENVOI, Suite...)."""
     return "%13" + code
 
 def ws_log(*args):
-    """
-    Fonction log WebSocket.
-    """
+    """Fonction log WebSocket."""
     msg = "[WS] " + " ".join(str(a) for a in args)
     print(msg)
 
 def ws_closed_screen():
-    """
-    Écran Connexion interrompue.
-    """
+    """Écran Connexion interrompue."""
     clear()
     header("WebSocket", bg=ROUGE, fg=BLANC)
 
@@ -768,9 +745,7 @@ def ws_closed_screen():
             break
 
 def ws_connect(url):
-    """
-    Connexion à un serveur WebSocket Minitel.
-    """
+    """Connexion à un serveur WebSocket Minitel."""
     global WS, WS_STATE
 
     WS_STATE = "CONNECTING"
@@ -825,9 +800,7 @@ def ws_connect(url):
     t.start()
 
 def ws_send_raw(data: str):
-    """
-    Convertit %XX en octets et envoi.
-    """
+    """Convertit %XX en octets et envoi."""
     i = 0
     out = bytearray()
 
@@ -845,9 +818,7 @@ def ws_send_raw(data: str):
         WS.send(out)
 
 def ws_send(data: str):
-    """
-    Envoi de données texte.
-    """
+    """Envoi de données texte."""
     global WS
     if not WS:
         ws_log("WS not connected")
@@ -856,9 +827,7 @@ def ws_send(data: str):
     WS.send(data)
 
 def ws_handle_input(event):
-    """
-    Détecter et envoyer les touches.
-    """
+    """Détecter et envoyer les touches."""
     et, val = event
 
     if et == "CHAR":
@@ -896,9 +865,7 @@ def ws_handle_input(event):
         ws_send_raw(mp_key("I"))   # Connexion / Fin
 
 def app_websocket():
-    """
-    Application Websocket.
-    """
+    """Application Websocket."""
     global WS, WS_STATE
     clear()
     header('WebSocket', bg=MAGENTA, fg=BLANC)
@@ -959,9 +926,7 @@ def app_websocket():
 # Configuration
 
 def app_config():
-    """
-    Application Configuration.
-    """
+    """Application Configuration."""
     cfg = load_config()
 
     options = [
@@ -1001,7 +966,7 @@ def app_config():
 
     # Entrée de texte.
     def text_input(ligne, colonne, longueur, masked=False):
-        """Read a line of text. Returns string or None if cancelled."""
+        """Champ de texte, retourne un string ou None si annulé"""
         data = ""
         pos(ligne, colonne)
         fill('.', longueur)
@@ -1144,9 +1109,7 @@ def app_config():
                 break
 
     def do_upgrade():
-        """
-        Mise à jour système.
-        """
+        """Mise à jour système."""
 
         clear()
         header("Mise à jour", bg=VERT, fg=NOIR)
@@ -1252,9 +1215,7 @@ def app_config():
                 break
 
     def show_info():
-        """
-        Infos systèmes.
-        """
+        """Infos systèmes."""
         clear()
         header("Infos système", bg=CYAN, fg=NOIR)
         textbg(2, 1, "Etat de la machine".ljust(WIDTH), CYAN, NOIR)
