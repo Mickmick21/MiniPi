@@ -1538,6 +1538,8 @@ if __name__ == '__main__':
     action = None
 
     try:
+        t = threading.Thread(target=background_init, daemon=True)
+        t.start()
         main()
 
     except (KeyboardInterrupt, SystemExit):
