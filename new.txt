@@ -7,6 +7,3 @@ NOUVEAU DANS MINIPI v1.1.0 :
 ---- (Le serveur pourrait toujours la fermer)
 ---- (Il faut maintenant appuyer deux fois pour forcer)
 -- Enlèvement du "Ping Pong"
-
-- Configuration
--- Programmation vitesse (Uniquement certains Minitels)
