@@ -25,8 +25,6 @@ import websocket
 ANSI_RE = re.compile(r'\x1b\[([0-9;]*)m')
 
 WS = None
-WS_RUNNING = False
-WS_URL = None
 WS_STATE = "DISCONNECTED"   # DISCONNECTED | CONNECTING | CONNECTED | CLOSED | ERROR
 WS_LAST_CLOSE_INFO = ""
 
@@ -169,7 +167,7 @@ def load_config():
     """
     cfg = {}
     try:
-        with open(CONFIG_FILE, "r") as f:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if "=" in line and not line.startswith("#"):
@@ -184,11 +182,14 @@ def save_config(cfg):
     """
     Sauvegarder la configuration.
     """
-    with open(CONFIG_FILE, "w") as f:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         for k, v in cfg.items():
             f.write(f"{k}={v}\n")
 
 def sys_run(cmd):
+    """
+    Executer une commande.
+    """
     try:
         return subprocess.check_output(
             cmd,
@@ -242,6 +243,7 @@ def sys_run_interactive(cmd, output_callback, input_callback=None):
 # Sortie Low-level
 
 def _write_bytes(data: bytes):
+    """Envoyer des données brutes."""
     ser.write(data)
 
 def send(text: str):
@@ -250,9 +252,11 @@ def send(text: str):
     _write_bytes(text.encode('latin-1', errors='ignore'))
 
 def sendchr(code: int):
+    """Envoyer un charactère."""
     _write_bytes(bytes([code]))
 
 def sendesc(seq: str):
+    """Envoyer le symbole ESC."""
     sendchr(27)
     send(seq)
 
@@ -272,6 +276,7 @@ def pos(ligne: int, colonne: int = 1):
         sendchr(64 + colonne)
 
 def cursor(visible: bool):
+    """Afficher ou cacher le curseur."""
     sendchr(17 if visible else 20)
 
 def color(c: int):
@@ -283,15 +288,19 @@ def bgcolor(c: int):
     sendesc(chr(80 + c))
 
 def inverse(on: bool = True):
+    """Inverser."""
     sendesc('\x5D' if on else '\x5C')
 
 def blink(on: bool = True):
+    """Clignotement."""
     sendesc('\x48' if on else '\x49')
 
 def underline(on: bool = True):
+    """Soulignement."""
     sendesc(chr(90) if on else chr(89))
 
 def bip():
+    """Envoyer le charactère BELL."""
     sendchr(7)
 
 def eol(ligne: int, colonne: int = 1):
@@ -316,13 +325,9 @@ def fill(char: str, count: int):
         sendchr(64 + n)
         remaining -= n
 
-def hline(ligne: int, colonne: int, width: int, char: str = ' '):
-    pos(ligne, colonne)
-    fill(char, width)
-
-# Conversion des accents, STUM 2.3.1 p.22
 
 def _accents(text: str) -> str:
+    """Conversion des accents, STUM 2.3.1 p.22"""
     replacements = [
         ('à', '\x19\x41a'), ('â', '\x19\x43a'), ('ä', '\x19\x48a'),
         ('è', '\x19\x41e'), ('é', '\x19\x42e'), ('ê', '\x19\x43e'), ('ë', '\x19\x48e'),
@@ -373,11 +378,8 @@ def read_event():
       None
     """
     def debug(ev, raw):
-        try:
-            print(f"[RAW] {raw.hex()} ({list(raw)})")
-            print(f"[EV ] {ev}")
-        except:
-            pass
+        print(f"[RAW] {raw.hex()} ({list(raw)})")
+        print(f"[EV ] {ev}")
 
     c = ser.read(1)
     if not c:
@@ -544,7 +546,7 @@ def get_uptime() -> str:
     """
     Retourne le temps que le Raspberry Pi est allumé.
     """
-    with open('/proc/uptime') as f:
+    with open('/proc/uptime', encoding="utf-8") as f:
         secs = float(f.read().split()[0])
     h, m = divmod(int(secs) // 60, 60)
     return f'{h}h{m:02d}m'
@@ -638,14 +640,13 @@ def app_shell():
             return val.encode()
 
         if et == "KEY":
-            if val == KEY_ENVOI:
-                return b"\n"
-            elif val == KEY_CORRECTION:
-                return b"\x7f"
-            elif val == KEY_ANNULATION:
-                return b"\x03"
-            elif val == KEY_SOMMAIRE:
-                return b"\x04"
+            keymap = {
+                KEY_ENVOI: b"\n",
+                KEY_CORRECTION: b"\x7f",
+                KEY_ANNULATION: b"\x03",
+                KEY_SOMMAIRE: b"\x04",
+            }
+            return keymap.get(val)
 
         return None
 
@@ -690,11 +691,7 @@ def app_shell():
                 try:
                     cursor_y = output_line
                     cursor_x = 0
-                    sys_run_interactive(
-                        cmd,
-                        lambda data: term_write(data),
-                        input_cb
-                    )
+                    sys_run_interactive(cmd, term_write, input_cb)
                     output_line = cursor_y + 1
                 except Exception as e:
                     print_stream(f"[Erreur: {e}]")
@@ -748,11 +745,8 @@ def ws_log(*args):
     """
     Fonction log WebSocket.
     """
-    try:
-        msg = "[WS] " + " ".join(str(a) for a in args)
-        print(msg)
-    except:
-        pass
+    msg = "[WS] " + " ".join(str(a) for a in args)
+    print(msg)
 
 def ws_closed_screen():
     """
@@ -777,15 +771,13 @@ def ws_connect(url):
     """
     Connexion à un serveur WebSocket Minitel.
     """
-    global WS, WS_RUNNING, WS_URL, WS_STATE
+    global WS, WS_STATE
 
-    WS_URL = url
-    WS_RUNNING = False
     WS_STATE = "CONNECTING"
 
     ws_log("Connecting to:", url)
 
-    def on_message(ws, message):
+    def on_message(_, message):
         ws_log("RX message:", repr(message))
 
         if isinstance(message, str):
@@ -793,20 +785,20 @@ def ws_connect(url):
         else:
             _write_bytes(message)
 
-    def on_open(ws):
+    def on_open(_):
         global WS_STATE
         WS_STATE = "CONNECTED"
         ws_log("CONNECTED")
 
 
-    def on_close(ws, code, msg=None):
+    def on_close(_, code, msg=None):
         global WS_STATE, WS_LAST_CLOSE_INFO
         WS_STATE = "CLOSED"
         WS_LAST_CLOSE_INFO = f"{code} {msg}"
         ws_log("CLOSED", code, msg)
 
 
-    def on_error(ws, err):
+    def on_error(_, err):
         global WS_STATE
         WS_STATE = "ERROR"
         ws_log("ERROR:", err)
@@ -841,12 +833,9 @@ def ws_send_raw(data: str):
 
     while i < len(data):
         if data[i] == '%' and i + 2 < len(data):
-            try:
-                out.append(int(data[i+1:i+3], 16))
-                i += 3
-                continue
-            except:
-                pass
+            out.append(int(data[i+1:i+3], 16))
+            i += 3
+            continue
 
         out.append(ord(data[i]))
         i += 1
@@ -910,7 +899,7 @@ def app_websocket():
     """
     Application Websocket.
     """
-    global WS, WS_RUNNING, WS_URL, WS_STATE
+    global WS, WS_STATE
     clear()
     header('WebSocket', bg=MAGENTA, fg=BLANC)
 
@@ -955,11 +944,8 @@ def app_websocket():
 
                 if cnxfin_count >= 4:
                     ws_log("Appuie sur CNX/FIN deux fois.")
-                    try:
-                        if WS:
-                            WS.close()
-                    except:
-                        pass
+                    if WS:
+                        WS.close()
                     WS_STATE = "CLOSED"
                     ws_closed_screen()
                     break
@@ -1211,18 +1197,15 @@ def app_config():
             for cmd, label in cmds:
                 textbg(2, 1, label.ljust(WIDTH), VERT, NOIR)
 
-                proc = subprocess.Popen(
+                with subprocess.Popen(
                     cmd, shell=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                )
-
-                for raw_line in proc.stdout:
-                    line = raw_line.decode('utf-8', errors='replace').rstrip()
-                    if line:
-                        print_line(line)
-
-                proc.wait()
+                ) as proc:
+                    for raw_line in proc.stdout:
+                        line = raw_line.decode('utf-8', errors='replace').rstrip()
+                        if line:
+                            print_line(line)
 
         # Télécharger et executer le script.
         ## TODO: Vérifier via une signature le script pour éviter une attaque MITM.
@@ -1233,25 +1216,25 @@ def app_config():
 
             try:
                 fd, tmp_path = tempfile.mkstemp(suffix=".py")
-                os.close(fd)
+                try:
+                    os.close(fd)
 
-                urllib.request.urlretrieve(script_url, tmp_path)
+                    urllib.request.urlretrieve(script_url, tmp_path)
 
-                textbg(2, 1, "Execution du script...".ljust(WIDTH), VERT, NOIR)
+                    textbg(2, 1, "Execution du script...".ljust(WIDTH), VERT, NOIR)
 
-                proc = subprocess.Popen(
-                    f"python3 {tmp_path}",
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
-
-                for raw_line in proc.stdout:
-                    line = raw_line.decode('utf-8', errors='replace').rstrip()
-                    if line:
-                        print_line(line)
-
-                proc.wait()
+                    with subprocess.Popen(
+                        f"python3 {tmp_path}",
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    ) as proc:
+                        for raw_line in proc.stdout:
+                            line = raw_line.decode('utf-8', errors='replace').rstrip()
+                            if line:
+                                print_line(line)
+                finally:
+                    os.unlink(tmp_path)
 
             except Exception as e:
                 textbg(2, 1, "Erreur update script".ljust(WIDTH), ROUGE, BLANC)
@@ -1299,27 +1282,43 @@ def app_config():
 
         # Température du Processeur
         try:
-            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            with open("/sys/class/thermal/thermal_zone0/temp", encoding="utf-8") as f:
                 temp = int(f.read().strip()) // 1000
             temp_str = f"{temp}°C"
         except Exception:
             temp_str = "?"
-        pos(8, 3);  color(CYAN);  send("Temp   : "); color(BLANC); send(temp_str)
+        pos(8, 3)
+        color(CYAN)
+        send("Temp   : ")
+        color(BLANC)
+        send(temp_str)
 
         # Utilisation du disque.
         disk_out = sys_run("df -h /").strip().splitlines()
         disk_cols = disk_out[-1].split() if disk_out else []
         disk = f"{disk_cols[2]}/{disk_cols[1]} ({disk_cols[4]})" if len(disk_cols) >= 5 else "?"
-        pos(9, 3);  color(CYAN);  send("Disque : "); color(BLANC); send(disk)
+        pos(9, 3)
+        color(CYAN)
+        send("Disque : ")
+        color(BLANC)
+        send(disk)
 
         # RAM totale et libre.
         mem_out = sys_run("free -h").strip().splitlines()
         mem_cols = mem_out[1].split() if len(mem_out) > 1 else []
         mem = f"{mem_cols[2]}/{mem_cols[1]}" if len(mem_cols) >= 3 else "?"
-        pos(10, 3); color(CYAN);  send("RAM    : "); color(BLANC); send(mem)
+        pos(10, 3)
+        color(CYAN)
+        send("RAM    : ")
+        color(BLANC)
+        send(mem)
 
         # Version du script
-        pos(11, 3); color(CYAN); send("Version: "); color(BLANC); send(APP_VERSION)
+        pos(11, 3)
+        color(CYAN)
+        send("Version: ")
+        color(BLANC)
+        send(APP_VERSION)
 
         color(BLANC)
         footer("SOMMAIRE pour retourner", bg=CYAN, fg=NOIR)
@@ -1379,7 +1378,7 @@ _MENU_ITEMS = [
 ]
 
 def _draw_menu_item(i: int, selected: bool):
-    """Redraw a single menu entry row (padding line + label line)."""
+    """Retracer une seule option."""
     key, label, _ = _MENU_ITEMS[i]
     l = 5 + i * 3
     textbg(l,     1, ' ' * WIDTH, NOIR, BLANC)
@@ -1390,7 +1389,7 @@ def _draw_menu_item(i: int, selected: bool):
 
 
 def draw_menu(selected: int):
-    """Full screen draw — only called on first entry or after returning from an app."""
+    """Retracage complet."""
     clear()
     header(f'{APP_NAME} v{APP_VERSION}', bg=BLEU, fg=BLANC)
     info = f'{get_hostname()}  {get_ip()}  up {get_uptime()}'
@@ -1410,16 +1409,14 @@ def disable_local_echo():
     time.sleep(0.1)
 
 def background_init():
-    """
-    Envoyer toutes les 5 secondes les commandes d'initialisations.
-    """
+    """Envoyer toutes les 5 secondes les commandes d'initialisations."""
     while True:
         disable_local_echo()
-
 
         time.sleep(5)
 
 def main():
+    """Menu principal"""
     selected = 0
     draw_menu(selected)
 

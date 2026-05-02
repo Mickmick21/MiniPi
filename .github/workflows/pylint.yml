@@ -35,4 +35,5 @@ jobs:
 
       - name: Lint
         run: |
-          pylint $(git ls-files '*.py')
+          pylint --jobs=0 --output-format=colorized --score=y --fail-under=8 $(git ls-files '*.py')
+
