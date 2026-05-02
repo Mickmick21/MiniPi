@@ -4,6 +4,7 @@ NOUVEAU DANS MINIPI v1.1.0 :
 
 - Websocket
 -- La connexion n'est pas fermé par MiniPi lors de l'appui sur CNX/FIN
----- (Le serveur pourrait toujours la fermer)
----- (Il faut maintenant appuyer deux fois pour forcer)
 -- Enlèvement du "Ping Pong"
+
+- Général
+-- La désactivation de l'echo local se produira toute les 5 secondes
