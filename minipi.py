@@ -245,6 +245,22 @@ def sys_run_interactive(cmd, output_callback, input_callback=None):
             except ChildProcessError:
                 break
 
+ 
+def get_undervoltage() -> tuple:
+    """
+    Lit le registre de throttling du Pi via vcgencmd.
+    Retourne (actuelle, passée) :
+      actuelle : sous-tension en ce moment (bit 0)
+      passée   : sous-tension s'est produite depuis le boot (bit 16)
+    Retourne (False, False) si vcgencmd n'est pas disponible.
+    """
+    try:
+        raw = sys_run("vcgencmd get_throttled").strip()
+        # Format : "throttled=0x50000"
+        val = int(raw.split("=")[1], 16)
+        return bool(val & (1 << 0)), bool(val & (1 << 16))
+    except Exception:
+        return False, False
 
 # Sortie Low-level
 
@@ -1313,7 +1329,7 @@ def app_config():
         header("Vitesse de connexion", bg=BLEU, fg=BLANC)
         textbg(2, 1, "Choisir la vitesse de transmission".ljust(WIDTH), BLEU, BLANC)
 
-        vitesses = [75, 300, 1200, 4800]
+        vitesses = [75, 300, 1200, 4800, 9600]
         sel_v = vitesses.index(ser.baudrate) if ser.baudrate in vitesses else 2
         labels = [f"{v} bauds" for v in vitesses]
 
@@ -1648,7 +1664,7 @@ if __name__ == "__main__":
             "ERREUR SYSTEME",
             type(e).__name__,
             str(e),
-            ["Continuer", "Retour menu principal"],
+            ["Retour menu principal"],
         )
 
     # Actions.
@@ -1657,10 +1673,6 @@ if __name__ == "__main__":
 
     elif action == "Redémarrer le script":
         os.execv(sys.executable, [sys.executable] + sys.argv)
-
-    elif action == "Continuer":
-        # TODO: Faire que ça continue au lieu de retourner au menu principal.
-        main()
 
     elif action == "Retour au menu principal":
         main()
