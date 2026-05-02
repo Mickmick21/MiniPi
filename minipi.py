@@ -44,6 +44,66 @@ ser = serial.Serial(
 
 # Couleurs.
 
+# Vitesses disponibles pour la négociation de vitesse.
+VITESSES = [75, 300, 1200, 4800]
+
+def _build_exchange_byte(tx_baud: int, rx_baud: int) -> int:
+    """
+    Construit le byte d'échange de vitesse selon STUM 1B section 8.1.
+    Format : P|1|E2|E1|E0|R2|R1|R0
+      - Bit 7 (P)  : bit de parité paire sur les bits 6-0
+      - Bit 6      : toujours 1
+      - Bits 5-3 (E) : vitesse d'émission
+      - Bits 2-0 (R) : vitesse de réception
+    Codes vitesse : 001=75bd, 010=300bd, 100=1200bd, 110=4800bd, 111=9600bd
+    """
+    codes = {75: 0b001, 300: 0b010, 1200: 0b100, 4800: 0b110, 9600: 0b111}
+    e = codes[tx_baud]
+    r = codes[rx_baud]
+    # Bit 6 toujours 1, E sur bits 5-3, R sur bits 2-0
+    val = (1 << 6) | (e << 3) | r
+    # Parité paire : si le nombre de 1 dans les bits 6-0 est pair, mettre bit 7
+    if bin(val).count('1') % 2 == 0:
+        val |= (1 << 7)
+    return val
+
+
+def set_baudrate(new_baud: int) -> bool:
+    """
+    Négocie un changement de vitesse avec le Minitel selon STUM 1B section 8.1.
+    1. Envoie PRO1 + 0x6B + byte d'échange
+    2. Attend la réponse PRO2 + 0x75 + byte d'échange
+    3. Si le byte reçu correspond : change la vitesse et retourne True
+    4. Sinon : ne change rien et retourne False
+    """
+    exchange_byte = _build_exchange_byte(new_baud, new_baud)
+
+    # Envoi de la demande : PRO1 (ESC 0x39) + 0x6B + byte d'échange
+    ser.write(bytes([0x1B, 0x39, 0x6B, exchange_byte]))
+
+    # Attente de la réponse du Minitel (délai généreux : 500 ms)
+    ser.settimeout(0.5)
+    try:
+        resp = ser.read(4)
+    except Exception:
+        resp = b''
+    finally:
+        ser.settimeout(0.1)
+
+    # Réponse attendue : PRO2 (ESC 0x3A) + 0x75 + byte d'échange
+    if (len(resp) >= 4
+            and resp[0] == 0x1B
+            and resp[1] == 0x3A
+            and resp[2] == 0x75
+            and resp[3] == exchange_byte):
+        # Le Minitel a accepté - on change la vitesse côté Pi
+        ser.baudrate = new_baud
+        return True
+
+    # Refus ou réponse inattendue
+    return False
+
+
 NOIR    = 0
 ROUGE   = 1
 VERT    = 2
@@ -153,9 +213,7 @@ KEY_CORRECTION  = 7
 KEY_SUITE       = 8
 KEY_CNXFIN      = 25
 
-# ─────────────────────────────────────────────
-#  SYSTEM HELPERS
-# ─────────────────────────────────────────────
+# Fonctions systèmes.
 
 CONFIG_FILE = "/etc/minipi.conf"
 
@@ -503,8 +561,9 @@ def status(message: str, ligne: int = 23, bg: int = JAUNE,
     padded = message.center(WIDTH)
     textbg(ligne, 1, padded[:WIDTH], bg, fg)
     ser.flush()
-    time.sleep(delay)
-    textbg(ligne, 1, ' ' * WIDTH, NOIR, BLANC)
+    if delay != -1:
+        time.sleep(delay)
+        textbg(ligne, 1, ' ' * WIDTH, NOIR, BLANC)
 
 def box(top: int, left: int, height: int, width: int,
         bg: int = NOIR, fg: int = BLANC):
@@ -930,8 +989,9 @@ def app_config():
     cfg = load_config()
 
     options = [
-        "Hostname",
+        "Nom d'hôte",
         "Wi-Fi",
+        "Vitesse",
         "Mise à jour",
         "Infos système",
         "Redémarrer",
@@ -1006,7 +1066,7 @@ def app_config():
     def edit_hostname():
         clear()
         header("Nom d'hôte", bg=JAUNE, fg=NOIR)
-        textbg(2, 1, "Modifier le nom de la machine".ljust(WIDTH), JAUNE, NOIR)
+        textbg(2, 1, "Modifier le nom d'hôte".ljust(WIDTH), JAUNE, NOIR)
         pos(5, 3)
         color(BLANC)
         send("Actuel : ")
@@ -1020,7 +1080,7 @@ def app_config():
             sys_run(f"hostnamectl set-hostname {new.strip()}")
             cfg["HOSTNAME"] = new.strip()
             save_config(cfg)
-            status("Nom d'hote mis a jour !", delay=1.5)
+            status("Nom d'hôte mis a jour !", delay=1.5)
 
     # Changement du Réseau Wi-Fi
     def edit_wifi():
@@ -1294,8 +1354,98 @@ def app_config():
         update_row(i, i == selected)
     cursor(False)
 
+    # Vitesse baudrate
+    def edit_vitesse():
+        """Négociation de vitesse avec le Minitel."""
+        clear()
+        header("Vitesse de connexion", bg=BLEU, fg=BLANC)
+        textbg(2, 1, "Choisir la vitesse de transmission".ljust(WIDTH), BLEU, BLANC)
+
+        vitesses = [75, 300, 1200, 4800]
+        sel_v = vitesses.index(ser.baudrate) if ser.baudrate in vitesses else 2
+        labels = [f"{v} bauds" for v in vitesses]
+
+        def draw_vitesse_row(i, active):
+            y = 5 + i * 2
+            if active:
+                textbg(y, 5, f"> {labels[i]}".ljust(WIDTH - 5), BLEU, JAUNE)
+            else:
+                textbg(y, 5, f"  {labels[i]}".ljust(WIDTH - 5), NOIR, BLANC)
+
+        # Affichage initial
+        for i in range(len(vitesses)):
+            draw_vitesse_row(i, i == sel_v)
+
+        pos(14, 3)
+        color(CYAN)
+        send(f"Vitesse actuelle : {ser.baudrate} bd")
+        color(BLANC)
+
+        footer("ENVOI: choisir  SUITE/RETOUR: nav", bg=BLEU, fg=BLANC)
+        cursor(False)
+
+        while True:
+            ev = read_event()
+            if not ev:
+                continue
+            et, val = ev
+
+            if et == "KEY":
+                if val == KEY_SUITE:
+                    old_v = sel_v
+                    sel_v = (sel_v + 1) % len(vitesses)
+                    draw_vitesse_row(old_v, False)
+                    draw_vitesse_row(sel_v, True)
+
+                elif val == KEY_RETOUR:
+                    old_v = sel_v
+                    sel_v = (sel_v - 1) % len(vitesses)
+                    draw_vitesse_row(old_v, False)
+                    draw_vitesse_row(sel_v, True)
+
+                elif val == KEY_ENVOI:
+                    cible = vitesses[sel_v]
+
+                    if cible == ser.baudrate:
+                        # Déjà à cette vitesse
+                        status("Déjà à cette vitesse.", delay=1.2)
+                        break
+
+                    # Afficher "négociation en cours"
+                    pos(16, 3)
+                    color(CYAN)
+                    send(f"Négociation {cible} bd...".ljust(WIDTH - 3))
+                    color(BLANC)
+
+                    if set_baudrate(cible):
+                        pos(17, 3)
+                        color(VERT)
+                        send(f"Accepté ! Vitesse : {cible} bd".ljust(WIDTH - 3))
+                        color(BLANC)
+                        # Mettre à jour l'affichage vitesse actuelle
+                        pos(14, 3)
+                        color(CYAN)
+                        send(f"Vitesse actuelle : {ser.baudrate} bd")
+                        color(BLANC)
+                    else:
+                        pos(17, 3)
+                        color(ROUGE)
+                        send("Refusé par le Minitel.".ljust(WIDTH - 3))
+                        color(BLANC)
+
+                    footer("SOMMAIRE: retour", bg=BLEU, fg=BLANC)
+                    # Attendre SOMMAIRE pour revenir
+                    while True:
+                        ev2 = read_event()
+                        if ev2 and ev2[0] == "KEY" and ev2[1] == KEY_SOMMAIRE:
+                            break
+                    break
+
+                elif val == KEY_SOMMAIRE:
+                    break
+
     # Boucle principale.
-    actions = [edit_hostname, edit_wifi, do_upgrade, show_info, None]
+    actions = [edit_hostname, edit_wifi, edit_vitesse, do_upgrade, show_info, None]
 
     while True:
         ev = read_event()
@@ -1317,9 +1467,10 @@ def app_config():
                 update_row(selected, True)
 
             elif val == KEY_ENVOI:
-                if selected == 4:
+                if selected == 5:
                     # Redémarrer
-                    status("Redemarrage...", bg=ROUGE, fg=BLANC, delay=1.0)
+                    clear()
+                    status("Redémarrage...", bg=ROUGE, fg=BLANC, delay=-1)
                     sys_run("reboot")
                 elif actions[selected]:
                     actions[selected]()
