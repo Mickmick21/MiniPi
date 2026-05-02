@@ -82,13 +82,13 @@ def set_baudrate(new_baud: int) -> bool:
     ser.write(bytes([0x1B, 0x39, 0x6B, exchange_byte]))
 
     # Attente de la réponse du Minitel (délai généreux : 500 ms)
-    ser.settimeout(0.5)
+    ser.timeout = 0.5
     try:
         resp = ser.read(4)
     except Exception:
         resp = b''
     finally:
-        ser.settimeout(0.1)
+        ser.timeout = 0.1
 
     # Réponse attendue : PRO2 (ESC 0x3A) + 0x75 + byte d'échange
     if (len(resp) >= 4
