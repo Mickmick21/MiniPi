@@ -4,7 +4,6 @@
 # (C) 2026 Mickmick.bin - GNU General Public License v3.0
 # License available at https://choosealicense.com/licenses/gpl-3.0/
 
-import serial
 import time
 import subprocess
 import socket
@@ -12,13 +11,13 @@ import os
 import urllib.request
 import json
 import tempfile
-import websocket
 import threading
-from urllib.parse import unquote
 import re
 import pty
 import select
 import sys
+import serial
+import websocket
 
 ANSI_RE = re.compile(r'\x1b\[([0-9;]*)m')
 
@@ -312,7 +311,7 @@ def hline(ligne: int, colonne: int, width: int, char: str = ' '):
     pos(ligne, colonne)
     fill(char, width)
 
-# Conversion des accents, STUM 2.3.1 p.22 https://www.minitel-alcatel.fr/documents/M1_1983-1984/STUM%20M1.pdf 
+# Conversion des accents, STUM 2.3.1 p.22 
 
 def _accents(text: str) -> str:
     replacements = [
@@ -479,11 +478,6 @@ WIDTH = 40
 def textbg(ligne: int, colonne: int, text: str, bg: int, fg: int = BLANC):
     """
     Écrire du texte avec une couleur de fond sur une seule ligne.
-    En Videotex, chaque cellule de caractère possède ses propres attributs; par conséquent, `bgcolor+color`
-    doit être émis immédiatement avant CHAQUE caractère, et jamais juste avant un espace.
-    Pour ce faire, nous envoyons les octets d'attribut avant la chaîne entière;
-    ils restent actifs pour chaque caractère suivant jusqu'à ce qu'ils soient modifiés.
-    L'appelant est responsable du remplissage de `text` pour atteindre la largeur souhaitée.
     """
     pos(ligne, colonne)
     sendesc(chr(80 + bg))
