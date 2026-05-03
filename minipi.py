@@ -29,7 +29,7 @@ WS_STATE = "DISCONNECTED"  # DISCONNECTED | CONNECTING | CONNECTED | CLOSED | ER
 WS_LAST_CLOSE_INFO = ""
 
 APP_NAME = "MiniPi"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 APP_UA = f"{APP_NAME}/{APP_VERSION}"
 
 # Initialiser le serial.
@@ -245,7 +245,7 @@ def sys_run_interactive(cmd, output_callback, input_callback=None):
             except ChildProcessError:
                 break
 
- 
+
 def get_undervoltage() -> tuple:
     """
     Lit le registre de throttling du Pi via vcgencmd.
@@ -261,6 +261,7 @@ def get_undervoltage() -> tuple:
         return bool(val & (1 << 0)), bool(val & (1 << 16))
     except Exception:
         return False, False
+
 
 # Sortie Low-level
 
@@ -1497,18 +1498,11 @@ def disable_local_echo():
     time.sleep(0.1)
 
 
-def background_init():
-    """Envoyer toutes les 5 secondes les commandes d'initialisations."""
-    while True:
-        disable_local_echo()
-
-        time.sleep(5)
-
-
 def main():
     """Menu principal"""
     selected = 0
     draw_menu(selected)
+    disable_local_echo()
 
     while True:
         ev = read_event()
@@ -1629,8 +1623,6 @@ if __name__ == "__main__":
     action = None
 
     try:
-        t = threading.Thread(target=background_init, daemon=True)
-        t.start()
         main()
 
     except (KeyboardInterrupt, SystemExit):
