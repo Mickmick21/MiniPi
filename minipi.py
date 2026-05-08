@@ -267,13 +267,13 @@ def get_undervoltage() -> tuple:
 
 
 def send(text: str):
-    """Envoyer du texte, avec convertition des accents."""
+    """Envoyer du texte, avec conversion des accents."""
     text = _accents(text)
     ser.write(text.encode("latin-1", errors="ignore"))
 
 
 def sendchr(code: int):
-    """Envoyer un charactère."""
+    """Envoyer un caractère."""
     ser.write(bytes([code]))
 
 
@@ -332,7 +332,7 @@ def underline(on: bool = True):
 
 
 def bip():
-    """Envoyer le charactère BELL."""
+    """Envoyer le caractère BELL."""
     sendchr(7)
 
 
@@ -343,7 +343,7 @@ def eol(ligne: int, colonne: int = 1):
 
 
 def fill(char: str, count: int):
-    """Répéter un charactère count foix avec REP quand possible."""
+    """Répéter un caractère count fois avec REP quand possible."""
     if count <= 0:
         return
     send(char)
@@ -571,7 +571,7 @@ def status(
 
 
 def box(top: int, left: int, height: int, width: int, bg: int = NOIR, fg: int = BLANC):
-    """Remplire une zone rectangulaire avec une couleur de fond."""
+    """Remplir une zone rectangulaire avec une couleur de fond."""
     for l in range(top, top + height):
         textbg(l, left, " " * width, bg, fg)
 
@@ -585,7 +585,7 @@ def get_hostname() -> str:
 
 
 def get_ip() -> str:
-    """Retourne l'adresse IP du Rapberry Pi."""
+    """Retourne l'adresse IP du Raspberry Pi."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
@@ -1150,7 +1150,7 @@ def app_config():
             send("IP : " + get_ip())
         else:
             color(ROUGE)
-            send("Echec de connexion.")
+            send("Échec de la connexion.")
             color(BLANC)
             # Afficher la première ligne de l'erreur.
             first_line = (
@@ -1478,7 +1478,7 @@ def _draw_menu_item(i: int, selected: bool):
 
 
 def draw_menu(selected: int):
-    """Retracage complet."""
+    """Traçage complet."""
     clear()
     header(f"{APP_NAME} v{APP_VERSION}", bg=BLEU, fg=BLANC)
     info = f"{get_hostname()}  {get_ip()}  up {get_uptime()}"
