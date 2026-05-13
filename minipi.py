@@ -41,7 +41,7 @@ ser = serial.Serial(
 # Couleurs.
 
 # Vitesses disponibles pour la négociation de vitesse.
-VITESSES = [75, 300, 1200, 4800, 9600]
+VITESSES = [300, 1200, 4800, 9600]
 
 
 def _build_exchange_byte(tx_baud: int, rx_baud: int) -> int:
@@ -1465,7 +1465,7 @@ def app_config():
         header("Vitesse de connexion", bg=BLEU, fg=BLANC)
         textbg(2, 1, "Choisir la vitesse de transmission".ljust(WIDTH), BLEU, BLANC)
 
-        vitesses = [75, 300, 1200, 4800, 9600]
+        vitesses = [300, 1200, 4800, 9600]
         sel_v = vitesses.index(ser.baudrate) if ser.baudrate in vitesses else 2
         labels = [f"{v} bauds" for v in vitesses]
 
