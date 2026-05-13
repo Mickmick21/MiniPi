@@ -68,39 +68,121 @@ def _build_exchange_byte(tx_baud: int, rx_baud: int) -> int:
 def set_baudrate(new_baud: int) -> bool:
     """
     Négocie un changement de vitesse avec le Minitel selon STUM 1B section 8.1.
-    1. Envoie PRO1 + 0x6B + byte d'échange
+    1. Envoie PRO2 + 0x6B + octet d'échange
     2. Attend la réponse PRO2 + 0x75 + byte d'échange
-    3. Si le byte reçu correspond : change la vitesse et retourne True
+    3. Si le octet reçu correspond : change la vitesse et retourne True
     4. Sinon : ne change rien et retourne False
     """
     exchange_byte = _build_exchange_byte(new_baud, new_baud)
 
-    # Envoi de la demande : PRO1 (ESC 0x39) + 0x6B + byte d'échange
-    ser.write(bytes([0x1B, 0x39, 0x6B, exchange_byte]))
+    old_baud = ser.baudrate
 
-    # Attente de la réponse du Minitel (délai généreux : 500 ms)
-    ser.timeout = 0.5
+    # Envoi de la demande : PRO2 (ESC 0x3A) + 0x6B + octet d'échange
+    ser.write(bytes([0x1B, 0x3A, 0x6B, exchange_byte]))
+    ser.flush()
+
+    # Laisser partir les derniers octets
+    time.sleep(0.5)
+
+    # Le Minitel commute immédiatement, donc le Pi doit suivre
+    ser.baudrate = new_baud
+
+    # Petit délai de stabilisation
+    time.sleep(0.5)
+
+    # Vider ancien buffer RX
+    ser.reset_input_buffer()
+
+    # Demande position curseur : ESC 0x61
+    ser.write(b"\x1b\x61")
+    ser.flush()
+
+    # Laisser le temps à la réponse d'arriver
+    time.sleep(0.2)
+
     try:
-        resp = ser.read(4)
+        resp = ser.read(32)
     except Exception:
         resp = b""
-    finally:
-        ser.timeout = 0.1
 
-    # Réponse attendue : PRO2 (ESC 0x3A) + 0x75 + byte d'échange
-    if (
-        len(resp) >= 4
-        and resp[0] == 0x1B
-        and resp[1] == 0x3A
-        and resp[2] == 0x75
-        and resp[3] == exchange_byte
-    ):
-        # Le Minitel a accepté - on change la vitesse côté Pi
-        ser.baudrate = new_baud
+    # Réponse valide : présence de US (0x1F)
+    if 0x1F in resp:
         return True
 
-    # Refus ou réponse inattendue
+    # Échec : retour à l'ancienne vitesse
+    ser.baudrate = old_baud
     return False
+
+# Identification 
+def read_minitel_rom_info(timeout=0.2):
+    """
+    Tente de lire l'identification ROM du Minitel via ENQROM.
+    Retourne un tuple (raw_bytes, texte) ou (None, None) si pas de réponse.
+    """
+
+    # Vide le buffer série (important pour éviter de lire de vieilles données)
+    try:
+        ser.reset_input_buffer()
+    except Exception:
+        pass
+
+    # Envoi de la commande ENQROM
+    # PRO1 ENQROM
+    ser.write(bytes([0x1B, 0x39, 0x7B]))
+
+    # Attente courte d'une réponse
+    start = time.time()
+    data = bytearray()
+
+    while time.time() - start < timeout:
+        if ser.in_waiting:
+            data += ser.read(ser.in_waiting)
+        else:
+            time.sleep(0.01)
+
+    if not data:
+        return None, None
+
+    try:
+        text = data.decode("latin-1", errors="ignore")
+    except Exception:
+        text = ""
+
+    return data, text
+    
+def decode_minitel_rom(code: str):
+    """
+    Decode des chaînes type 'Bv9'
+    """
+
+    if len(code) < 3:
+        return None
+
+    fabricant_map = {
+        "A": "Matra",
+        "B": "Philips",
+        "C": "Telic",
+    }
+
+    model_map = {
+        "b": "Minitel 1",
+        "c": "Minitel 1",
+        "r": "Minitel 1(D)",
+        "s": "Minitel 1C",
+        "d": "Minitel 10",
+        "f": "Minitel 10",
+        "u": "Minitel 1B",
+        "w": "Minitel 10B",
+        "v": "Minitel 2",
+        "z": "Minitel 12",
+        "y": "Minitel 5"
+    }
+
+    fab = fabricant_map.get(code[0], f"Inconnu ({code[0]})")
+    model = model_map.get(code[1], f"Modèle inconnu ({code[1]})")
+    rom = code[2:]
+
+    return fab, model, rom
 
 
 NOIR = 0
@@ -405,6 +487,11 @@ def _accents(text: str) -> str:
 
 
 # Entrée
+SPECIAL_CHARS = {
+    0x7A: "œ",
+    0x6A: "Œ",
+    0x7B: "ß",
+}
 
 
 def read_event():
@@ -459,6 +546,24 @@ def read_event():
         code = k[0] - 64
 
         ev = ("KEY", code)
+        debug(ev, raw)
+        return ev
+
+    if b == 0x19:  # SS2 : caractère spécial
+        nxt = ser.read(1)
+
+        if not nxt:
+            return None
+
+        raw += nxt
+
+        special = SPECIAL_CHARS.get(nxt[0])
+
+        if special:
+            ev = ("CHAR", special)
+        else:
+            ev = None
+
         debug(ev, raw)
         return ev
 
@@ -943,6 +1048,10 @@ def app_websocket():
 
     footer("SOMMAIRE: retour", bg=MAGENTA, fg=BLANC)
 
+    cfg = load_config()
+
+    required_cnxfin = 4 if cfg.get("CNXFIN_DOUBLE", "1") == "1" else 2
+
     cnxfin_count = 0
 
     while True:
@@ -964,7 +1073,7 @@ def app_websocket():
                 if cnxfin_count == 1:
                     ws_handle_input(ev)
 
-                if cnxfin_count >= 4:
+                if cnxfin_count >= required_cnxfin:
                     ws_log("Appuie sur CNX/FIN deux fois.")
                     if WS:
                         WS.close()
@@ -990,6 +1099,7 @@ def app_config():
         "Nom d'hôte",
         "Wi-Fi",
         "Vitesse",
+        "Connexion/Fin",
         "Mise à jour",
         "Infos système",
         "Redémarrer",
@@ -1297,8 +1407,33 @@ def app_config():
             if len(mem_cols) > 1
             else "?"
         )
+        
+        # Infos Minitel (ENQROM)
+        
+        raw, text = read_minitel_rom_info()
+
+        if not raw:
+            minitel = "Non supporté ou aucune réponse"
+        else:
+            # On cherche une séquence lisible type "Bv9"
+            # Le Minitel peut renvoyer des octets avant/après
+            match = re.search(r"[A-Z][a-z]\d", text)
+
+            if match:
+                code = match.group(0)
+                decoded = decode_minitel_rom(code)
+
+                if decoded:
+                    fab, model, rom = decoded
+                    minitel = f"{model} {fab} ({code})"
+                else:
+                    minitel = code
+            else:
+                # fallback brut
+                minitel = text[:WIDTH - 12]
 
         infos = [
+            ("Minitel", minitel),
             ("Nom    ", get_hostname()),
             ("IP     ", get_ip()),
             ("Uptime ", get_uptime()),
@@ -1391,6 +1526,9 @@ def app_config():
                         color(VERT)
                         send(f"Accepté ! Vitesse : {cible} bd".ljust(WIDTH - 3))
                         color(BLANC)
+                        cfg["BAUDRATE"] = str(cible)
+                        save_config(cfg)
+
                         # Mettre à jour l'affichage vitesse actuelle
                         pos(14, 3)
                         color(CYAN)
@@ -1413,6 +1551,49 @@ def app_config():
                 elif val == KEY_SOMMAIRE:
                     break
 
+    def edit_cnxfin():
+        """Configuration Connexion/Fin."""
+
+        clear()
+        header("Connexion/Fin", bg=BLEU, fg=BLANC)
+
+        enabled = cfg.get("CNXFIN_DOUBLE", "1") == "1"
+
+        while True:
+
+            textbg(
+                4,
+                3,
+                (
+                    "Double impulsion : OUI" if enabled else "Double impulsion : NON"
+                ).ljust(WIDTH - 3),
+                BLEU if enabled else NOIR,
+                JAUNE if enabled else BLANC,
+            )
+
+            footer(
+                "ENVOI: changer  SOMMAIRE: retour",
+                bg=BLEU,
+                fg=BLANC,
+            )
+
+            ev = read_event()
+
+            if not ev:
+                continue
+
+            et, val = ev
+
+            if et == "KEY":
+
+                if val == KEY_ENVOI:
+                    enabled = not enabled
+                    cfg["CNXFIN_DOUBLE"] = "1" if enabled else "0"
+                    save_config(cfg)
+
+                elif val == KEY_SOMMAIRE:
+                    break
+
     def do_reboot():
         clear()
         status("Redémarrage...", bg=ROUGE, fg=BLANC, delay=-1)
@@ -1425,7 +1606,15 @@ def app_config():
     cursor(False)
 
     # Boucle principale.
-    actions = [edit_hostname, edit_wifi, edit_vitesse, do_upgrade, show_info, do_reboot]
+    actions = [
+        edit_hostname,
+        edit_wifi,
+        edit_vitesse,
+        edit_cnxfin,
+        do_upgrade,
+        show_info,
+        do_reboot,
+    ]
 
     while True:
         ev = read_event()
@@ -1479,6 +1668,7 @@ def _draw_menu_item(i: int, selected: bool):
 
 def draw_menu(selected: int):
     """Traçage complet."""
+    eol(0)
     clear()
     header(f"{APP_NAME} v{APP_VERSION}", bg=BLEU, fg=BLANC)
     info = f"{get_hostname()}  {get_ip()}  up {get_uptime()}"
@@ -1500,9 +1690,16 @@ def disable_local_echo():
 
 def main():
     """Menu principal"""
+    cfg = load_config()
+
+    saved_baud = int(cfg.get("BAUDRATE", "1200"))
+
+    if saved_baud != 1200:
+        if not set_baudrate(saved_baud):
+            ser.baudrate = 1200
     selected = 0
-    draw_menu(selected)
     disable_local_echo()
+    draw_menu(selected)
 
     while True:
         ev = read_event()
