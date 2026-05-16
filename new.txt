@@ -1,10 +1,9 @@
-NOUVEAU DANS MINIPI v1.1.0 :
-- Terminal
--- Support de commandes comme APT
-
-- Websocket
--- La connexion n'est pas fermé par MiniPi lors de l'appui sur CNX/FIN
--- Enlèvement du "Ping Pong"
-
+NOUVEAU DANS MINIPI v1.2.0 :
 - Général
--- La désactivation de l'echo local se produira toute les 5 secondes
+-- Plus de désactivation d'echo local toutes les 5 secondes.
+-- Le code est maintenant plus efficace.
+
+- Configuration
+-- Programation Vitesse de communication.
+-- Correction d'un bug avec le changement du hostname.
+-- Affichage du modèle du Minitel si supporté.

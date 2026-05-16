@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-""" 
+"""
 MiniPi - Minitel interface for Raspberry Pi
 GPIO UART (ttyAMA0) @ 1200 baud, 7E1
 (C) 2026 Mickmick.bin - GNU General Public License v3.0
 License available at https://choosealicense.com/licenses/gpl-3.0/
 """
 
-
 import time
 import subprocess
 import socket
 import os
 import urllib.request
+from urllib.parse import unquote_to_bytes
 import json
 import tempfile
 import threading
@@ -22,42 +22,183 @@ import sys
 import serial
 import websocket
 
-ANSI_RE = re.compile(r'\x1b\[([0-9;]*)m')
+ANSI_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 WS = None
-WS_STATE = "DISCONNECTED"   # DISCONNECTED | CONNECTING | CONNECTED | CLOSED | ERROR
+WS_STATE = "DISCONNECTED"  # DISCONNECTED | CONNECTING | CONNECTED | CLOSED | ERROR
 WS_LAST_CLOSE_INFO = ""
 
 APP_NAME = "MiniPi"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 APP_UA = f"{APP_NAME}/{APP_VERSION}"
 
 # Initialiser le serial.
 
 ser = serial.Serial(
-    "/dev/ttyAMA0",
-    baudrate=1200,
-    bytesize=7,
-    parity='E',
-    stopbits=1,
-    timeout=0.1
+    "/dev/ttyAMA0", baudrate=1200, bytesize=7, parity="E", stopbits=1, timeout=0.1
 )
 
 # Couleurs.
 
-NOIR    = 0
-ROUGE   = 1
-VERT    = 2
-JAUNE   = 3
-BLEU    = 4
+# Vitesses disponibles pour la négociation de vitesse.
+VITESSES = [300, 1200, 4800, 9600]
+
+
+def _build_exchange_byte(tx_baud: int, rx_baud: int) -> int:
+    """
+    Construit le byte d'échange de vitesse selon STUM 1B section 8.1.
+    Format : P|1|E2|E1|E0|R2|R1|R0
+      - Bit 7 (P)  : bit de parité paire sur les bits 6-0
+      - Bit 6      : toujours 1
+      - Bits 5-3 (E) : vitesse d'émission
+      - Bits 2-0 (R) : vitesse de réception
+    Codes vitesse : 001=75bd, 010=300bd, 100=1200bd, 110=4800bd, 111=9600bd
+    """
+    codes = {75: 0b001, 300: 0b010, 1200: 0b100, 4800: 0b110, 9600: 0b111}
+    e = codes[tx_baud]
+    r = codes[rx_baud]
+    # Bit 6 toujours 1, E sur bits 5-3, R sur bits 2-0
+    val = (1 << 6) | (e << 3) | r
+    # Parité paire : si le nombre de 1 dans les bits 6-0 est pair, mettre bit 7
+    if bin(val).count("1") % 2 == 0:
+        val |= 1 << 7
+    return val
+
+
+def set_baudrate(new_baud: int) -> bool:
+    """
+    Négocie un changement de vitesse avec le Minitel selon STUM 1B section 8.1.
+    1. Envoie PRO2 + 0x6B + octet d'échange
+    2. Attend la réponse PRO2 + 0x75 + byte d'échange
+    3. Si le octet reçu correspond : change la vitesse et retourne True
+    4. Sinon : ne change rien et retourne False
+    """
+    exchange_byte = _build_exchange_byte(new_baud, new_baud)
+
+    old_baud = ser.baudrate
+
+    # Envoi de la demande : PRO2 (ESC 0x3A) + 0x6B + octet d'échange
+    ser.write(bytes([0x1B, 0x3A, 0x6B, exchange_byte]))
+    ser.flush()
+
+    # Laisser partir les derniers octets
+    time.sleep(0.5)
+
+    # Le Minitel commute immédiatement, donc le Pi doit suivre
+    ser.baudrate = new_baud
+
+    # Petit délai de stabilisation
+    time.sleep(0.5)
+
+    # Vider ancien buffer RX
+    ser.reset_input_buffer()
+
+    # Demande position curseur : ESC 0x61
+    ser.write(b"\x1b\x61")
+    ser.flush()
+
+    # Laisser le temps à la réponse d'arriver
+    time.sleep(0.2)
+
+    try:
+        resp = ser.read(32)
+    except Exception:
+        resp = b""
+
+    # Réponse valide : présence de US (0x1F)
+    if 0x1F in resp:
+        return True
+
+    # Échec : retour à l'ancienne vitesse
+    ser.baudrate = old_baud
+    return False
+
+
+# Identification
+def read_minitel_rom_info(timeout=0.8):
+    """
+    Tente de lire l'identification ROM du Minitel via ENQROM.
+    Retourne un tuple (raw_bytes, texte) ou (None, None) si pas de réponse.
+    """
+
+    # Vide le buffer série (important pour éviter de lire de vieilles données)
+    try:
+        ser.reset_input_buffer()
+    except Exception:
+        pass
+
+    # Envoi de la commande ENQROM
+    # PRO1 ENQROM
+    ser.write(bytes([0x1B, 0x39, 0x7B]))
+
+    # Attente courte d'une réponse
+    start = time.time()
+    data = bytearray()
+
+    while time.time() - start < timeout:
+        if ser.in_waiting:
+            data += ser.read(ser.in_waiting)
+        else:
+            time.sleep(0.01)
+
+    if not data:
+        return None, None
+
+    try:
+        text = data.decode("latin-1", errors="ignore")
+    except Exception:
+        text = ""
+
+    return data, text
+
+
+def decode_minitel_rom(code: str):
+    """
+    Decode des chaînes type 'Bv9'
+    """
+
+    if len(code) < 3:
+        return None
+
+    fabricant_map = {
+        "A": "Matra",
+        "B": "Philips",
+        "C": "Telic",
+    }
+
+    model_map = {
+        "b": "Minitel 1",
+        "c": "Minitel 1",
+        "r": "Minitel 1(D)",
+        "s": "Minitel 1C",
+        "d": "Minitel 10",
+        "f": "Minitel 10",
+        "u": "Minitel 1B",
+        "w": "Minitel 10B",
+        "v": "Minitel 2",
+        "z": "Minitel 12",
+        "y": "Minitel 5",
+    }
+
+    fab = fabricant_map.get(code[0], f"Inconnu ({code[0]})")
+    model = model_map.get(code[1], f"Modèle inconnu ({code[1]})")
+    rom = code[2:]
+
+    return fab, model, rom
+
+
+NOIR = 0
+ROUGE = 1
+VERT = 2
+JAUNE = 3
+BLEU = 4
 MAGENTA = 5
-CYAN    = 6
-BLANC   = 7
+CYAN = 6
+BLANC = 7
+
 
 def ansi_apply(text: str, draw_char):
-    """
-    ansi_to_minitel mais en streaming.
-    """
+    """ansi_to_minitel mais en streaming."""
 
     fg = BLANC
     bg = NOIR
@@ -65,16 +206,16 @@ def ansi_apply(text: str, draw_char):
     i = 0
     while i < len(text):
 
-        if text[i] == '\x1b' and i + 1 < len(text) and text[i+1] == '[':
+        if text[i] == "\x1b" and i + 1 < len(text) and text[i + 1] == "[":
             j = i + 2
-            seq = ''
+            seq = ""
 
-            while j < len(text) and text[j] != 'm':
+            while j < len(text) and text[j] != "m":
                 seq += text[j]
                 j += 1
 
             if j < len(text):
-                codes = seq.split(';')
+                codes = seq.split(";")
 
                 for c in codes:
                     if not c:
@@ -97,74 +238,26 @@ def ansi_apply(text: str, draw_char):
         draw_char(text[i], fg, bg)
         i += 1
 
-def ansi_to_minitel(text: str):
-    """
-    Convertion basique de codes couleurs ANSI vers des couleurs Minitel.
-    Support:
-      30–37 (fg)
-      40–47 (bg)
-      0 reset
-    """
-    parts = ANSI_RE.split(text)
-
-    out = []
-    i = 0
-
-    while i < len(parts):
-        chunk = parts[i]
-        out.append(chunk)
-        i += 1
-
-        if i >= len(parts):
-            break
-
-        codes = parts[i]
-        i += 1
-
-        for code in codes.split(';'):
-            if not code:
-                continue
-
-            c = int(code)
-
-            # RESET
-            if c == 0:
-                color(BLANC)
-                bgcolor(NOIR)
-
-            # FG
-            elif 30 <= c <= 37:
-                color(c - 30)
-
-            # BG
-            elif 40 <= c <= 47:
-                bgcolor(c - 40)
-
-    return ''.join(out)
 
 # Codes de touches fonctions. (SEP + chr(64+code))
 
-KEY_ENVOI       = 1
-KEY_RETOUR      = 2
-KEY_REPETITION  = 3
-KEY_GUIDE       = 4
-KEY_ANNULATION  = 5
-KEY_SOMMAIRE    = 6
-KEY_CORRECTION  = 7
-KEY_SUITE       = 8
-KEY_CNXFIN      = 25
+KEY_ENVOI = 1
+KEY_RETOUR = 2
+KEY_REPETITION = 3
+KEY_GUIDE = 4
+KEY_ANNULATION = 5
+KEY_SOMMAIRE = 6
+KEY_CORRECTION = 7
+KEY_SUITE = 8
+KEY_CNXFIN = 25
 
-# ─────────────────────────────────────────────
-#  SYSTEM HELPERS
-# ─────────────────────────────────────────────
+# Fonctions systèmes.
 
 CONFIG_FILE = "/etc/minipi.conf"
 
 
 def load_config():
-    """
-    Charger la configuration.
-    """
+    """Charger la configuration."""
     cfg = {}
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -179,25 +272,21 @@ def load_config():
 
 
 def save_config(cfg):
-    """
-    Sauvegarder la configuration.
-    """
+    """Sauvegarder la configuration."""
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         for k, v in cfg.items():
             f.write(f"{k}={v}\n")
 
+
 def sys_run(cmd):
-    """
-    Executer une commande.
-    """
+    """Executer une commande."""
     try:
         return subprocess.check_output(
-            cmd,
-            shell=True,
-            stderr=subprocess.STDOUT
+            cmd, shell=True, stderr=subprocess.STDOUT
         ).decode(errors="ignore")
     except Exception as e:
         return str(e)
+
 
 def sys_run_interactive(cmd, output_callback, input_callback=None):
     """
@@ -240,76 +329,105 @@ def sys_run_interactive(cmd, output_callback, input_callback=None):
             except ChildProcessError:
                 break
 
+
+def get_undervoltage() -> tuple:
+    """
+    Lit le registre de throttling du Pi via vcgencmd.
+    Retourne (actuelle, passée) :
+      actuelle : sous-tension en ce moment (bit 0)
+      passée   : sous-tension s'est produite depuis le boot (bit 16)
+    Retourne (False, False) si vcgencmd n'est pas disponible.
+    """
+    try:
+        raw = sys_run("vcgencmd get_throttled").strip()
+        # Format : "throttled=0x50000"
+        val = int(raw.split("=")[1], 16)
+        return bool(val & (1 << 0)), bool(val & (1 << 16))
+    except Exception:
+        return False, False
+
+
 # Sortie Low-level
 
-def _write_bytes(data: bytes):
-    """Envoyer des données brutes."""
-    ser.write(data)
 
 def send(text: str):
-    """Envoyer du texte, avec convertition des accents."""
+    """Envoyer du texte, avec conversion des accents."""
     text = _accents(text)
-    _write_bytes(text.encode('latin-1', errors='ignore'))
+    ser.write(text.encode("latin-1", errors="ignore"))
+
 
 def sendchr(code: int):
-    """Envoyer un charactère."""
-    _write_bytes(bytes([code]))
+    """Envoyer un caractère."""
+    ser.write(bytes([code]))
+
 
 def sendesc(seq: str):
     """Envoyer le symbole ESC."""
     sendchr(27)
     send(seq)
 
+
 # Contrôle de l'écran.
+
 
 def clear():
     """Effacer l'écran et bouger le curseur à sa maison."""
-    sendchr(12)   # FF
+    sendchr(12)  # FF
+
 
 def pos(ligne: int, colonne: int = 1):
     """Positioner le curseur (ligne, colonne), 1-indexed."""
     if ligne == 1 and colonne == 1:
-        sendchr(30)   # RS = home
+        sendchr(30)  # RS = home
     else:
-        sendchr(31)   # US
+        sendchr(31)  # US
         sendchr(64 + ligne)
         sendchr(64 + colonne)
+
 
 def cursor(visible: bool):
     """Afficher ou cacher le curseur."""
     sendchr(17 if visible else 20)
 
+
 def color(c: int):
     """Changer la couleur d'avant-plan."""
     sendesc(chr(64 + c))
+
 
 def bgcolor(c: int):
     """Changer la couleur d'arrière-plan"""
     sendesc(chr(80 + c))
 
+
 def inverse(on: bool = True):
     """Inverser."""
-    sendesc('\x5D' if on else '\x5C')
+    sendesc("\x5d" if on else "\x5c")
+
 
 def blink(on: bool = True):
     """Clignotement."""
-    sendesc('\x48' if on else '\x49')
+    sendesc("\x48" if on else "\x49")
+
 
 def underline(on: bool = True):
     """Soulignement."""
     sendesc(chr(90) if on else chr(89))
 
+
 def bip():
-    """Envoyer le charactère BELL."""
+    """Envoyer le caractère BELL."""
     sendchr(7)
+
 
 def eol(ligne: int, colonne: int = 1):
     """Effacer de (ligne, colonne) à la fin de la ligne."""
     pos(ligne, colonne)
-    sendchr(24)   # CAN
+    sendchr(24)  # CAN
+
 
 def fill(char: str, count: int):
-    """Répéter un charactère count foix avec REP quand possible."""
+    """Répéter un caractère count fois avec REP quand possible."""
     if count <= 0:
         return
     send(char)
@@ -321,7 +439,7 @@ def fill(char: str, count: int):
     remaining = count - 1
     while remaining > 0:
         n = min(remaining, 63)
-        sendchr(18)          # REP
+        sendchr(18)  # REP
         sendchr(64 + n)
         remaining -= n
 
@@ -329,30 +447,39 @@ def fill(char: str, count: int):
 def _accents(text: str) -> str:
     """Conversion des accents, STUM 2.3.1 p.22"""
     replacements = [
-        ('à', '\x19\x41a'), ('â', '\x19\x43a'), ('ä', '\x19\x48a'),
-        ('è', '\x19\x41e'), ('é', '\x19\x42e'), ('ê', '\x19\x43e'), ('ë', '\x19\x48e'),
-        ('î', '\x19\x43i'), ('ï', '\x19\x48i'),
-        ('ô', '\x19\x43o'), ('ö', '\x19\x48o'),
-        ('ù', '\x19\x41u'), ('û', '\x19\x43u'), ('ü', '\x19\x48u'),
-        ('ç', '\x19\x4Bc'),
-        ('À', '\x19\x41A'),
-        ('È', '\x19\x41E'),
-        ('É', '\x19\x42E'),
-        ('Î', '\x19\x43I'),
-        ('Ô', '\x19\x43O'),
-        ('Ù', '\x19\x41U'),
-        ('Ç', '\x19\x4BC'),
-        ('£', '\x19\x23'),
-        ('°', '\x19\x30'),
-        ('¼', '\x19\x3C'),
-        ('½', '\x19\x3D'),
-        ('¾', '\x19\x3E'),
-        ('←', '\x19\x2C'),
-        ('↑', '\x19\x2D'),
-        ('→', '\x19\x2E'),
-        ('↓', '\x19\x2F'),
-        ('Œ', '\x19\x6A'),
-        ('œ', '\x19\x7A'),
+        ("à", "\x19\x41a"),
+        ("â", "\x19\x43a"),
+        ("ä", "\x19\x48a"),
+        ("è", "\x19\x41e"),
+        ("é", "\x19\x42e"),
+        ("ê", "\x19\x43e"),
+        ("ë", "\x19\x48e"),
+        ("î", "\x19\x43i"),
+        ("ï", "\x19\x48i"),
+        ("ô", "\x19\x43o"),
+        ("ö", "\x19\x48o"),
+        ("ù", "\x19\x41u"),
+        ("û", "\x19\x43u"),
+        ("ü", "\x19\x48u"),
+        ("ç", "\x19\x4bc"),
+        ("À", "\x19\x41A"),
+        ("È", "\x19\x41E"),
+        ("É", "\x19\x42E"),
+        ("Î", "\x19\x43I"),
+        ("Ô", "\x19\x43O"),
+        ("Ù", "\x19\x41U"),
+        ("Ç", "\x19\x4bC"),
+        ("£", "\x19\x23"),
+        ("°", "\x19\x30"),
+        ("¼", "\x19\x3c"),
+        ("½", "\x19\x3d"),
+        ("¾", "\x19\x3e"),
+        ("←", "\x19\x2c"),
+        ("↑", "\x19\x2d"),
+        ("→", "\x19\x2e"),
+        ("↓", "\x19\x2f"),
+        ("Œ", "\x19\x6a"),
+        ("œ", "\x19\x7a"),
     ]
 
     for src, dst in replacements:
@@ -360,12 +487,13 @@ def _accents(text: str) -> str:
 
     return text
 
-# Entrée
 
-# Protocoles
-_PRO1 = '\x1b\x39'
-_PRO2 = '\x1b\x3a'
-_PRO3 = '\x1b\x3b'
+# Entrée
+SPECIAL_CHARS = {
+    0x7A: "œ",
+    0x6A: "Œ",
+    0x7B: "ß",
+}
 
 
 def read_event():
@@ -377,6 +505,7 @@ def read_event():
       ("ESC",  None)
       None
     """
+
     def debug(ev, raw):
         print(f"[RAW] {raw.hex()} ({list(raw)})")
         print(f"[EV ] {ev}")
@@ -422,8 +551,26 @@ def read_event():
         debug(ev, raw)
         return ev
 
-    ch = c.decode('latin-1')
-    if ch >= ' ':
+    if b == 0x19:  # SS2 : caractère spécial
+        nxt = ser.read(1)
+
+        if not nxt:
+            return None
+
+        raw += nxt
+
+        special = SPECIAL_CHARS.get(nxt[0])
+
+        if special:
+            ev = ("CHAR", special)
+        else:
+            ev = None
+
+        debug(ev, raw)
+        return ev
+
+    ch = c.decode("latin-1")
+    if ch >= " ":
         ev = ("CHAR", ch)
         debug(ev, raw)
         return ev
@@ -432,8 +579,9 @@ def read_event():
     return None
 
 
-def read_input(ligne: int, colonne: int, longueur: int,
-               data: str = '', char_fill: str = '.') -> tuple:
+def read_input(
+    ligne: int, colonne: int, longueur: int, data: str = "", char_fill: str = "."
+) -> tuple:
     """
     Blocage de la saisie de texte dans un seul champ.
     Affiche le champ, gère la modification, renvoie (text, key_code).
@@ -459,7 +607,7 @@ def read_input(ligne: int, colonne: int, longueur: int,
                 send(char_fill)
                 pos(ligne, colonne + len(data))
             elif val == KEY_ANNULATION:
-                data = ''
+                data = ""
                 pos(ligne, colonne)
                 fill(char_fill, longueur)
                 pos(ligne, colonne)
@@ -479,89 +627,98 @@ def read_input(ligne: int, colonne: int, longueur: int,
             else:
                 bip()
 
-#Interface utilisateur
+
+def wait_sommaire():
+    """Bloquer jusqu'à ce que l'utilisateur appuie sur SOMMAIRE."""
+    while True:
+        ev = read_event()
+        if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
+            return
+
+
+# Interface utilisateur
 
 WIDTH = 40
 
+
 def textbg(ligne: int, colonne: int, text: str, bg: int, fg: int = BLANC):
-    """
-    Écrire du texte avec une couleur de fond sur une seule ligne.
-    """
+    """Écrire du texte avec une couleur de fond sur une seule ligne."""
     pos(ligne, colonne)
     sendesc(chr(80 + bg))
     sendesc(chr(64 + fg))
-    send(' ')
+    send(" ")
     send(text.ljust(WIDTH - 1))
     sendesc(chr(64 + BLANC))
     sendesc(chr(80 + NOIR))
+
 
 def header(title: str, bg: int = BLEU, fg: int = BLANC):
     """Tracer une barre de titre colorée sur toute la largeur de la ligne 1."""
     padded = title.center(WIDTH)
     textbg(1, 1, padded[:WIDTH], bg, fg)
 
+
 def footer(text: str, bg: int = BLEU, fg: int = BLANC):
     """Tracer une barre d'indice colorée à la ligne 24."""
     padded = text.center(WIDTH - 1)
-    textbg(24, 1, padded[:WIDTH - 1], bg, fg)
+    textbg(24, 1, padded[: WIDTH - 1], bg, fg)
 
-def status(message: str, ligne: int = 23, bg: int = JAUNE,
-           fg: int = NOIR, delay: float = 1.5):
+
+def status(
+    message: str, ligne: int = 23, bg: int = JAUNE, fg: int = NOIR, delay: float = 1.5
+):
     """Afficher temporairement un message d'état coloré, puis l'effacer."""
     cursor(False)
     padded = message.center(WIDTH)
     textbg(ligne, 1, padded[:WIDTH], bg, fg)
     ser.flush()
-    time.sleep(delay)
-    textbg(ligne, 1, ' ' * WIDTH, NOIR, BLANC)
+    if delay != -1:
+        time.sleep(delay)
+        textbg(ligne, 1, " " * WIDTH, NOIR, BLANC)
 
-def box(top: int, left: int, height: int, width: int,
-        bg: int = NOIR, fg: int = BLANC):
-    """Remplire une zone rectangulaire avec une couleur de fond."""
+
+def box(top: int, left: int, height: int, width: int, bg: int = NOIR, fg: int = BLANC):
+    """Remplir une zone rectangulaire avec une couleur de fond."""
     for l in range(top, top + height):
-        textbg(l, left, ' ' * width, bg, fg)
+        textbg(l, left, " " * width, bg, fg)
+
 
 # Infos système minifiés (utilisé par Accueil et Configuration)
 
+
 def get_hostname() -> str:
-    """
-    Retourne le hostname.
-    """
+    """Retourne le hostname."""
     return socket.gethostname()
 
+
 def get_ip() -> str:
-    """
-    Retourne l'adresse IP du Rapberry Pi.
-    """
+    """Retourne l'adresse IP du Raspberry Pi."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
     except OSError:
-        return 'Pas d\'internet'
+        return "Pas d'internet"
+
 
 def get_uptime() -> str:
-    """
-    Retourne le temps que le Raspberry Pi est allumé.
-    """
-    with open('/proc/uptime', encoding="utf-8") as f:
+    """Retourne le temps que le Raspberry Pi est allumé."""
+    with open("/proc/uptime", encoding="utf-8") as f:
         secs = float(f.read().split()[0])
     h, m = divmod(int(secs) // 60, 60)
-    return f'{h}h{m:02d}m'
+    return f"{h}h{m:02d}m"
+
 
 # Terminal
 
-def app_shell():
-    """
-    Application shell.
-    """
-    clear()
-    header('Terminal', bg=VERT, fg=NOIR)
-    textbg(2, 1, 'SOMMAIRE: quitter  SUITE/RETOUR: historique'.ljust(WIDTH), VERT, NOIR)
 
-    cmd = ''
+def app_shell():
+    """Application shell."""
+    clear()
+    header("Terminal", bg=VERT, fg=NOIR)
+    textbg(2, 1, "SOMMAIRE: quitter  SUITE/RETOUR: historique".ljust(WIDTH), VERT, NOIR)
+
+    cmd = ""
     history: list = []
     hist_idx = -1
     output_line = 4
@@ -573,18 +730,18 @@ def app_shell():
         if output_line > 22:
             output_line = 4
             clear()
-            header('Terminal', bg=VERT, fg=NOIR)
+            header("Terminal", bg=VERT, fg=NOIR)
         color(VERT)
         pos(output_line, 1)
-        send('$ ')
+        send("$ ")
         color(BLANC)
 
     def redraw_cmd():
         color(VERT)
         pos(output_line, 1)
-        send('$ ')
+        send("$ ")
         color(BLANC)
-        send(cmd[:WIDTH - 2].ljust(WIDTH - 2))
+        send(cmd[: WIDTH - 2].ljust(WIDTH - 2))
         pos(output_line, 3 + len(cmd))
 
     def term_write(data):
@@ -596,20 +753,20 @@ def app_shell():
             color(fg)
             bgcolor(bg)
 
-            if ch == '\n':
+            if ch == "\n":
                 cursor_x = 0
                 cursor_y += 1
                 return
 
-            if ch == '\r':
+            if ch == "\r":
                 cursor_x = 0
                 return
 
-            if ch == '\x08':
+            if ch == "\x08":
                 if cursor_x > 0:
                     cursor_x -= 1
                     pos(cursor_y, cursor_x + 1)
-                    send(' ')
+                    send(" ")
                     pos(cursor_y, cursor_x + 1)
                 return
 
@@ -619,7 +776,7 @@ def app_shell():
 
             if cursor_y > 22:
                 for l in range(4, 23):
-                    textbg(l, 1, ' ' * WIDTH, NOIR, BLANC)
+                    textbg(l, 1, " " * WIDTH, NOIR, BLANC)
                 cursor_y = 4
 
             pos(cursor_y, cursor_x + 1)
@@ -627,7 +784,6 @@ def app_shell():
             cursor_x += 1
 
         ansi_apply(data, draw)
-
 
     def input_cb():
         ev = read_event()
@@ -662,13 +818,13 @@ def app_shell():
         if et == "KEY":
 
             if val == KEY_ENVOI:
-                send('\r\n')
+                send("\r\n")
                 output_line += 1
                 if cmd.strip():
                     history.append(cmd)
                     hist_idx = len(history)
 
-                if cmd.strip() in ('exit', 'quit'):
+                if cmd.strip() in ("exit", "quit"):
                     break
 
                 cursor(False)
@@ -676,17 +832,27 @@ def app_shell():
                 def print_stream(text):
                     nonlocal output_line
 
-                    text = ansi_to_minitel(text)
+                    def draw_char(ch, fg, bg):
+                        nonlocal output_line
+                        if ch == "\n":
+                            output_line += 1
+                            if output_line > 22:
+                                output_line = 4
+                                clear()
+                                header("Terminal", bg=VERT, fg=NOIR)
+                            pos(output_line, 1)
+                            return
+                        color(fg)
+                        bgcolor(bg)
+                        send(ch)
 
-                    for line in text.splitlines():
-                        if output_line > 22:
-                            output_line = 4
-                            clear()
-                            header('Terminal', bg=VERT, fg=NOIR)
+                    if output_line > 22:
+                        output_line = 4
+                        clear()
+                        header("Terminal", bg=VERT, fg=NOIR)
+                    pos(output_line, 1)
 
-                        pos(output_line, 1)
-                        send(line[:WIDTH])
-                        output_line += 1
+                    ansi_apply(text, draw_char)
 
                 try:
                     cursor_y = output_line
@@ -696,7 +862,7 @@ def app_shell():
                 except Exception as e:
                     print_stream(f"[Erreur: {e}]")
 
-                cmd = ''
+                cmd = ""
                 prompt_line()
                 cursor(True)
 
@@ -706,16 +872,16 @@ def app_shell():
                     redraw_cmd()
 
             elif val == KEY_ANNULATION:
-                cmd = ''
+                cmd = ""
                 redraw_cmd()
 
-            elif val == KEY_SUITE:          # next history
+            elif val == KEY_SUITE:  # next history
                 if history and hist_idx < len(history) - 1:
                     hist_idx += 1
                     cmd = history[hist_idx]
                     redraw_cmd()
 
-            elif val == KEY_RETOUR:         # previous history
+            elif val == KEY_RETOUR:  # previous history
                 if history and hist_idx > 0:
                     hist_idx -= 1
                     cmd = history[hist_idx]
@@ -733,25 +899,23 @@ def app_shell():
 
     cursor(False)
 
+
 # Websocket
 
+
 def mp_key(code: str):
-    """
-    Touche fonction (Guide, ENVOI, Suite...).
-    """
+    """Touche fonction (Guide, ENVOI, Suite...)."""
     return "%13" + code
 
+
 def ws_log(*args):
-    """
-    Fonction log WebSocket.
-    """
+    """Fonction log WebSocket."""
     msg = "[WS] " + " ".join(str(a) for a in args)
     print(msg)
 
+
 def ws_closed_screen():
-    """
-    Écran Connexion interrompue.
-    """
+    """Écran Connexion interrompue."""
     clear()
     header("WebSocket", bg=ROUGE, fg=BLANC)
 
@@ -762,15 +926,11 @@ def ws_closed_screen():
 
     footer("SOMMAIRE pour retour", bg=ROUGE, fg=BLANC)
 
-    while True:
-        ev = read_event()
-        if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-            break
+    wait_sommaire()
+
 
 def ws_connect(url):
-    """
-    Connexion à un serveur WebSocket Minitel.
-    """
+    """Connexion à un serveur WebSocket Minitel."""
     global WS, WS_STATE
 
     WS_STATE = "CONNECTING"
@@ -781,22 +941,20 @@ def ws_connect(url):
         ws_log("RX message:", repr(message))
 
         if isinstance(message, str):
-            _write_bytes(message.encode('latin-1', errors='ignore'))
+            ser.write(message.encode("latin-1", errors="ignore"))
         else:
-            _write_bytes(message)
+            ser.write(message)
 
     def on_open(_):
         global WS_STATE
         WS_STATE = "CONNECTED"
         ws_log("CONNECTED")
 
-
     def on_close(_, code, msg=None):
         global WS_STATE, WS_LAST_CLOSE_INFO
         WS_STATE = "CLOSED"
         WS_LAST_CLOSE_INFO = f"{code} {msg}"
         ws_log("CLOSED", code, msg)
-
 
     def on_error(_, err):
         global WS_STATE
@@ -806,48 +964,31 @@ def ws_connect(url):
     WS = websocket.WebSocketApp(
         url,
         header=[
-            "User-Agent: {APP_UA}",
+            f"User-Agent: {APP_UA}",
         ],
         on_message=on_message,
         on_open=on_open,
         on_close=on_close,
-        on_error=on_error
+        on_error=on_error,
     )
 
     def runner():
         ws_log("Thread started")
-        WS.run_forever(
-            ping_interval=0,
-            ping_timeout=10
-        )
+        WS.run_forever(ping_interval=0, ping_timeout=10)
 
-    t = threading.Thread(target=runner, daemon=True)
-    t.start()
+    ws_thread = threading.Thread(target=runner, daemon=True)
+    ws_thread.start()
+
 
 def ws_send_raw(data: str):
-    """
-    Convertit %XX en octets et envoi.
-    """
-    i = 0
-    out = bytearray()
-
-    while i < len(data):
-        if data[i] == '%' and i + 2 < len(data):
-            out.append(int(data[i+1:i+3], 16))
-            i += 3
-            continue
-
-        out.append(ord(data[i]))
-        i += 1
-
+    """Convertit %XX en octets et envoi."""
+    payload = unquote_to_bytes(data)
     if WS:
-        ws_log("TX RAW:", out)
-        WS.send(out)
+        WS.send(payload)
+
 
 def ws_send(data: str):
-    """
-    Envoi de données texte.
-    """
+    """Envoi de données texte."""
     global WS
     if not WS:
         ws_log("WS not connected")
@@ -855,10 +996,22 @@ def ws_send(data: str):
     ws_log("TX:", repr(data))
     WS.send(data)
 
+
+_WS_KEY_MAP = {
+    KEY_ENVOI: "A",
+    KEY_SUITE: "H",
+    KEY_CORRECTION: "G",
+    KEY_GUIDE: "D",
+    KEY_REPETITION: "C",
+    KEY_RETOUR: "B",
+    KEY_ANNULATION: "E",
+    KEY_SOMMAIRE: "F",
+    KEY_CNXFIN: "I",
+}
+
+
 def ws_handle_input(event):
-    """
-    Détecter et envoyer les touches.
-    """
+    """Détecter et envoyer les touches."""
     et, val = event
 
     if et == "CHAR":
@@ -868,42 +1021,18 @@ def ws_handle_input(event):
     if et != "KEY":
         return
 
-    if val == KEY_ENVOI:
-        ws_send_raw(mp_key("A"))   # ENVOI
+    letter = _WS_KEY_MAP.get(val)
+    if letter:
+        ws_send_raw(mp_key(letter))
 
-    elif val == KEY_SUITE:
-        ws_send_raw(mp_key("H"))   # Suite
-
-    elif val == KEY_CORRECTION:
-        ws_send_raw(mp_key("G"))   # Correction
-
-    elif val == KEY_GUIDE:
-        ws_send_raw(mp_key("D"))   # Guide
-
-    elif val == KEY_REPETITION:
-        ws_send_raw(mp_key("C"))   # Répétition
-
-    elif val == KEY_RETOUR:
-        ws_send_raw(mp_key("B"))   # Retour
-
-    elif val == KEY_ANNULATION:
-        ws_send_raw(mp_key("E"))   # Annulation
-
-    elif val == KEY_SOMMAIRE:
-        ws_send_raw(mp_key("F"))   # Sommaire
-
-    elif val == KEY_CNXFIN:
-        ws_send_raw(mp_key("I"))   # Connexion / Fin
 
 def app_websocket():
-    """
-    Application Websocket.
-    """
+    """Application Websocket."""
     global WS, WS_STATE
     clear()
-    header('WebSocket', bg=MAGENTA, fg=BLANC)
+    header("WebSocket", bg=MAGENTA, fg=BLANC)
 
-    textbg(2, 1, 'URL WebSocket (wss:// ou ws://):', MAGENTA, BLANC)
+    textbg(2, 1, "URL WebSocket (wss:// ou ws://):", MAGENTA, BLANC)
     url, key = read_input(4, 3, 34, data="")
 
     if key == KEY_SOMMAIRE or not url:
@@ -914,12 +1043,16 @@ def app_websocket():
         return
 
     clear()
-    header('WebSocket', bg=MAGENTA, fg=BLANC)
-    textbg(2, 1, 'Connexion...'.ljust(WIDTH), MAGENTA, BLANC)
+    header("WebSocket", bg=MAGENTA, fg=BLANC)
+    textbg(2, 1, "Connexion...".ljust(WIDTH), MAGENTA, BLANC)
 
     ws_connect(url)
 
-    footer('SOMMAIRE: retour', bg=MAGENTA, fg=BLANC)
+    footer("SOMMAIRE: retour", bg=MAGENTA, fg=BLANC)
+
+    cfg = load_config()
+
+    required_cnxfin = 4 if cfg.get("CNXFIN_DOUBLE", "1") == "1" else 2
 
     cnxfin_count = 0
 
@@ -942,7 +1075,7 @@ def app_websocket():
                 if cnxfin_count == 1:
                     ws_handle_input(ev)
 
-                if cnxfin_count >= 4:
+                if cnxfin_count >= required_cnxfin:
                     ws_log("Appuie sur CNX/FIN deux fois.")
                     if WS:
                         WS.close()
@@ -956,17 +1089,19 @@ def app_websocket():
         elif et == "CHAR":
             ws_handle_input(ev)
 
+
 # Configuration
 
+
 def app_config():
-    """
-    Application Configuration.
-    """
+    """Application Configuration."""
     cfg = load_config()
 
     options = [
-        "Hostname",
+        "Nom d'hôte",
         "Wi-Fi",
+        "Vitesse",
+        "Connexion/Fin",
         "Mise à jour",
         "Infos système",
         "Redémarrer",
@@ -987,8 +1122,7 @@ def app_config():
         for i, opt in enumerate(options):
             y = 6 + i * 2
             textbg(y, 3, f"  {opt}".ljust(WIDTH - 3), NOIR, BLANC)
-        footer("ENVOI: choisir  SUITE/RETOUR: nav",
-               bg=ROUGE, fg=BLANC)
+        footer("ENVOI: choisir  SUITE/RETOUR: nav", bg=ROUGE, fg=BLANC)
 
     # Uniquement modifier les lignes nécessaires.
     def update_row(i, active):
@@ -1001,10 +1135,10 @@ def app_config():
 
     # Entrée de texte.
     def text_input(ligne, colonne, longueur, masked=False):
-        """Read a line of text. Returns string or None if cancelled."""
+        """Champ de texte, retourne un string ou None si annulé"""
         data = ""
         pos(ligne, colonne)
-        fill('.', longueur)
+        fill(".", longueur)
         pos(ligne, colonne)
         cursor(True)
         while True:
@@ -1014,19 +1148,19 @@ def app_config():
             et, val = ev
             if et == "CHAR" and len(data) < longueur:
                 data += val
-                send('*' if masked else val)
+                send("*" if masked else val)
             elif et == "KEY":
                 if val == KEY_CORRECTION and data:
                     data = data[:-1]
                     pos(ligne, colonne)
-                    fill('.', longueur)
+                    fill(".", longueur)
                     pos(ligne, colonne)
-                    send(('*' if masked else '') * len(data) if masked else data)
+                    send(("*" if masked else "") * len(data) if masked else data)
                     pos(ligne, colonne + len(data))
                 elif val == KEY_ANNULATION:
                     data = ""
                     pos(ligne, colonne)
-                    fill('.', longueur)
+                    fill(".", longueur)
                     pos(ligne, colonne)
                 elif val == KEY_ENVOI:
                     cursor(False)
@@ -1041,7 +1175,7 @@ def app_config():
     def edit_hostname():
         clear()
         header("Nom d'hôte", bg=JAUNE, fg=NOIR)
-        textbg(2, 1, "Modifier le nom de la machine".ljust(WIDTH), JAUNE, NOIR)
+        textbg(2, 1, "Modifier le nom d'hôte".ljust(WIDTH), JAUNE, NOIR)
         pos(5, 3)
         color(BLANC)
         send("Actuel : ")
@@ -1051,11 +1185,38 @@ def app_config():
         pos(8, 3)
         send("Nouveau (ENVOI pour valider) :")
         new = text_input(10, 3, 30)
+        if not new:
+            return False
+        
+        new_host = new.strip()
+        
         if new:
-            sys_run(f"hostnamectl set-hostname {new.strip()}")
+            sys_run(f"hostnamectl set-hostname {new_host}")
+            try:
+
+                with open("/etc/hosts", "r", encoding="utf-8") as f:
+                    hosts = f.read()
+
+                # Remplacer toute ligne 127.0.1.1
+                hosts = re.sub(
+                    r"^127\.0\.1\.1\s+.*$",
+                    f"127.0.1.1\t{new_host}",
+                    hosts,
+                    flags=re.MULTILINE,
+                )
+
+                # Si aucune ligne n'existe
+                if "127.0.1.1" not in hosts:
+                    hosts += f"\n127.0.1.1\t{new_host}\n"
+
+                with open("/etc/hosts", "w", encoding="utf-8") as f:
+                    f.write(hosts)
+
+            except Exception:
+                pass
             cfg["HOSTNAME"] = new.strip()
             save_config(cfg)
-            status("Nom d'hote mis a jour !", delay=1.5)
+            status("Nom d'hôte mis a jour !", delay=1.5)
 
     # Changement du Réseau Wi-Fi
     def edit_wifi():
@@ -1109,9 +1270,7 @@ def app_config():
 
         ## Mot de passe.
         if password:
-            sys_run(
-                f'nmcli con modify "{ssid_escaped}" wifi-sec.key-mgmt wpa-psk'
-            )
+            sys_run(f'nmcli con modify "{ssid_escaped}" wifi-sec.key-mgmt wpa-psk')
             sys_run(
                 f'nmcli con modify "{ssid_escaped}" wifi-sec.psk "{password_escaped}"'
             )
@@ -1130,23 +1289,20 @@ def app_config():
             send("IP : " + get_ip())
         else:
             color(ROUGE)
-            send("Echec de connexion.")
+            send("Échec de la connexion.")
             color(BLANC)
             # Afficher la première ligne de l'erreur.
-            first_line = result.strip().splitlines()[0][:WIDTH - 3] if result.strip() else ""
+            first_line = (
+                result.strip().splitlines()[0][: WIDTH - 3] if result.strip() else ""
+            )
             pos(8, 3)
             send(first_line)
 
         footer("SOMMAIRE pour retourner", bg=BLEU, fg=BLANC)
-        while True:
-            ev = read_event()
-            if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                break
+        wait_sommaire()
 
     def do_upgrade():
-        """
-        Mise à jour système.
-        """
+        """Mise à jour système."""
 
         clear()
         header("Mise à jour", bg=VERT, fg=NOIR)
@@ -1160,7 +1316,7 @@ def app_config():
             while len(text) > 0:
                 if output_line > 23:
                     for l in range(4, 24):
-                        textbg(l, 1, ' ' * WIDTH, NOIR, BLANC)
+                        textbg(l, 1, " " * WIDTH, NOIR, BLANC)
                     output_line = 4
                 pos(output_line, 1)
                 color(BLANC)
@@ -1173,17 +1329,20 @@ def app_config():
             textbg(2, 1, "Téléchargement de la config...".ljust(WIDTH), VERT, NOIR)
             with urllib.request.urlopen(
                 "https://raw.githubusercontent.com/Mickmick21/MiniPi/refs/heads/main/latest.json",
-                timeout=5
+                timeout=5,
             ) as r:
                 cfg = json.loads(r.read().decode())
         except Exception as e:
-            textbg(2, 1, "Erreur lors du chargement de la config.".ljust(WIDTH), ROUGE, BLANC)
+            textbg(
+                2,
+                1,
+                "Erreur lors du chargement de la config.".ljust(WIDTH),
+                ROUGE,
+                BLANC,
+            )
             print_line(str(e))
             footer("SOMMAIRE pour retour", bg=ROUGE, fg=BLANC)
-            while True:
-                ev = read_event()
-                if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                    return
+            wait_sommaire()
 
         # Mise à jour via APT
         if cfg.get("doAptBeforeUpdate", False):
@@ -1198,12 +1357,13 @@ def app_config():
                 textbg(2, 1, label.ljust(WIDTH), VERT, NOIR)
 
                 with subprocess.Popen(
-                    cmd, shell=True,
+                    cmd,
+                    shell=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                 ) as proc:
                     for raw_line in proc.stdout:
-                        line = raw_line.decode('utf-8', errors='replace').rstrip()
+                        line = raw_line.decode("utf-8", errors="replace").rstrip()
                         if line:
                             print_line(line)
 
@@ -1230,7 +1390,7 @@ def app_config():
                         stderr=subprocess.STDOUT,
                     ) as proc:
                         for raw_line in proc.stdout:
-                            line = raw_line.decode('utf-8', errors='replace').rstrip()
+                            line = raw_line.decode("utf-8", errors="replace").rstrip()
                             if line:
                                 print_line(line)
                 finally:
@@ -1246,86 +1406,227 @@ def app_config():
         textbg(2, 1, "Mise à jour terminée !".ljust(WIDTH), VERT, NOIR)
         footer("SOMMAIRE pour retourner", bg=VERT, fg=NOIR)
 
-        while True:
-            ev = read_event()
-            if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                break
+        wait_sommaire()
 
     def show_info():
-        """
-        Infos systèmes.
-        """
+        """Infos système."""
         clear()
         header("Infos système", bg=CYAN, fg=NOIR)
-        textbg(2, 1, "Etat de la machine".ljust(WIDTH), CYAN, NOIR)
+        textbg(2, 1, "État de la machine".ljust(WIDTH), CYAN, NOIR)
 
-        pos(4, 3)
-        color(CYAN)
-        send("Nom    : ")
-        color(BLANC)
-        send(get_hostname())
-        pos(5, 3)
-        color(CYAN)
-        send("IP     : ")
-        color(BLANC)
-        send(get_ip())
-        pos(6, 3)
-        color(CYAN)
-        send("Uptime : ")
-        color(BLANC)
-        send(get_uptime())
-        pos(7, 3)
-        color(CYAN)
-        send("Arch   : ")
-        color(BLANC)
-        send(sys_run("uname -m").strip())
-
-        # Température du Processeur
+        # Température CPU
         try:
             with open("/sys/class/thermal/thermal_zone0/temp", encoding="utf-8") as f:
-                temp = int(f.read().strip()) // 1000
-            temp_str = f"{temp}°C"
+                temp = f"{int(f.read().strip()) // 1000}°C"
         except Exception:
-            temp_str = "?"
-        pos(8, 3)
-        color(CYAN)
-        send("Temp   : ")
-        color(BLANC)
-        send(temp_str)
+            temp = "?"
 
-        # Utilisation du disque.
-        disk_out = sys_run("df -h /").strip().splitlines()
-        disk_cols = disk_out[-1].split() if disk_out else []
-        disk = f"{disk_cols[2]}/{disk_cols[1]} ({disk_cols[4]})" if len(disk_cols) >= 5 else "?"
-        pos(9, 3)
-        color(CYAN)
-        send("Disque : ")
-        color(BLANC)
-        send(disk)
+        # Utilisation disque
+        disk_cols = sys_run("df -h /").strip().splitlines()[-1].split()
+        disk = (
+            f"{disk_cols[2]}/{disk_cols[1]} ({disk_cols[4]})"
+            if len(disk_cols) >= 5
+            else "?"
+        )
 
-        # RAM totale et libre.
-        mem_out = sys_run("free -h").strip().splitlines()
-        mem_cols = mem_out[1].split() if len(mem_out) > 1 else []
-        mem = f"{mem_cols[2]}/{mem_cols[1]}" if len(mem_cols) >= 3 else "?"
-        pos(10, 3)
-        color(CYAN)
-        send("RAM    : ")
-        color(BLANC)
-        send(mem)
+        # RAM
+        mem_cols = sys_run("free -h").strip().splitlines()
+        mem = (
+            f"{mem_cols[1].split()[2]}/{mem_cols[1].split()[1]}"
+            if len(mem_cols) > 1
+            else "?"
+        )
 
-        # Version du script
-        pos(11, 3)
-        color(CYAN)
-        send("Version: ")
-        color(BLANC)
-        send(APP_VERSION)
+        # Infos Minitel (ENQROM)
+
+        raw, text = read_minitel_rom_info()
+
+        if not raw:
+            minitel = "Non supporté ou aucune réponse"
+        else:
+            # On cherche une séquence lisible type "Bv9"
+            # Le Minitel peut renvoyer des octets avant/après
+            match = re.search(r"[A-Z][a-z]\d", text)
+
+            if match:
+                code = match.group(0)
+                decoded = decode_minitel_rom(code)
+
+                if decoded:
+                    fab, model, rom = decoded
+                    minitel = f"{model} {fab} ({code})"
+                else:
+                    minitel = code
+            else:
+                # fallback brut
+                minitel = text[: WIDTH - 12]
+
+        infos = [
+            ("Minitel", minitel),
+            ("Nom    ", get_hostname()),
+            ("IP     ", get_ip()),
+            ("Uptime ", get_uptime()),
+            ("Arch   ", sys_run("uname -m").strip()),
+            ("Temp   ", temp),
+            ("Disque ", disk),
+            ("RAM    ", mem),
+            ("Version", APP_VERSION),
+        ]
+
+        def info_row(ligne, label, value):
+            pos(ligne, 3)
+            color(CYAN)
+            send(f"{label}: ")
+            color(BLANC)
+            send(value)
+
+        for i, (label, value) in enumerate(infos):
+            info_row(4 + i, label, value)
 
         color(BLANC)
         footer("SOMMAIRE pour retourner", bg=CYAN, fg=NOIR)
+        wait_sommaire()
+
+    # Vitesse baudrate
+    def edit_vitesse():
+        """Négociation de vitesse avec le Minitel."""
+        clear()
+        header("Vitesse de connexion", bg=BLEU, fg=BLANC)
+        textbg(2, 1, "Choisir la vitesse de transmission".ljust(WIDTH), BLEU, BLANC)
+
+        vitesses = [300, 1200, 4800, 9600]
+        sel_v = vitesses.index(ser.baudrate) if ser.baudrate in vitesses else 2
+        labels = [f"{v} bauds" for v in vitesses]
+
+        def draw_vitesse_row(i, active):
+            y = 5 + i * 2
+            if active:
+                textbg(y, 5, f"> {labels[i]}".ljust(WIDTH - 5), BLEU, JAUNE)
+            else:
+                textbg(y, 5, f"  {labels[i]}".ljust(WIDTH - 5), NOIR, BLANC)
+
+        # Affichage initial
+        for i in range(len(vitesses)):
+            draw_vitesse_row(i, i == sel_v)
+
+        pos(14, 3)
+        color(CYAN)
+        send(f"Vitesse actuelle : {ser.baudrate} bd")
+        color(BLANC)
+
+        footer("ENVOI: choisir  SUITE/RETOUR: nav", bg=BLEU, fg=BLANC)
+        cursor(False)
+
         while True:
             ev = read_event()
-            if ev and ev[0] == "KEY" and ev[1] == KEY_SOMMAIRE:
-                break
+            if not ev:
+                continue
+            et, val = ev
+
+            if et == "KEY":
+                if val == KEY_SUITE:
+                    old_v = sel_v
+                    sel_v = (sel_v + 1) % len(vitesses)
+                    draw_vitesse_row(old_v, False)
+                    draw_vitesse_row(sel_v, True)
+
+                elif val == KEY_RETOUR:
+                    old_v = sel_v
+                    sel_v = (sel_v - 1) % len(vitesses)
+                    draw_vitesse_row(old_v, False)
+                    draw_vitesse_row(sel_v, True)
+
+                elif val == KEY_ENVOI:
+                    cible = vitesses[sel_v]
+
+                    if cible == ser.baudrate:
+                        # Déjà à cette vitesse
+                        status("Déjà à cette vitesse.", delay=1.2)
+                        break
+
+                    # Afficher "négociation en cours"
+                    pos(16, 3)
+                    color(CYAN)
+                    send(f"Négociation {cible} bd...".ljust(WIDTH - 3))
+                    color(BLANC)
+
+                    if set_baudrate(cible):
+                        pos(17, 3)
+                        color(VERT)
+                        send(f"Accepté ! Vitesse : {cible} bd".ljust(WIDTH - 3))
+                        color(BLANC)
+                        cfg["BAUDRATE"] = str(cible)
+                        save_config(cfg)
+
+                        # Mettre à jour l'affichage vitesse actuelle
+                        pos(14, 3)
+                        color(CYAN)
+                        send(f"Vitesse actuelle : {ser.baudrate} bd")
+                        color(BLANC)
+                    else:
+                        pos(17, 3)
+                        color(ROUGE)
+                        send("Refusé par le Minitel.".ljust(WIDTH - 3))
+                        color(BLANC)
+
+                    footer("SOMMAIRE: retour", bg=BLEU, fg=BLANC)
+                    # Attendre SOMMAIRE pour revenir
+                    while True:
+                        ev2 = read_event()
+                        if ev2 and ev2[0] == "KEY" and ev2[1] == KEY_SOMMAIRE:
+                            break
+                    break
+
+                elif val == KEY_SOMMAIRE:
+                    break
+
+    def edit_cnxfin():
+        """Configuration Connexion/Fin."""
+
+        clear()
+        header("Connexion/Fin", bg=BLEU, fg=BLANC)
+
+        enabled = cfg.get("CNXFIN_DOUBLE", "1") == "1"
+
+        while True:
+
+            textbg(
+                4,
+                3,
+                (
+                    "Double impulsion : OUI" if enabled else "Double impulsion : NON"
+                ).ljust(WIDTH - 3),
+                BLEU if enabled else NOIR,
+                JAUNE if enabled else BLANC,
+            )
+
+            footer(
+                "ENVOI: changer  SOMMAIRE: retour",
+                bg=BLEU,
+                fg=BLANC,
+            )
+
+            ev = read_event()
+
+            if not ev:
+                continue
+
+            et, val = ev
+
+            if et == "KEY":
+
+                if val == KEY_ENVOI:
+                    enabled = not enabled
+                    cfg["CNXFIN_DOUBLE"] = "1" if enabled else "0"
+                    save_config(cfg)
+
+                elif val == KEY_SOMMAIRE:
+                    break
+
+    def do_reboot():
+        clear()
+        status("Redémarrage...", bg=ROUGE, fg=BLANC, delay=-1)
+        sys_run("reboot")
 
     # Dessiner le menu et les options.
     draw_static()
@@ -1334,7 +1635,15 @@ def app_config():
     cursor(False)
 
     # Boucle principale.
-    actions = [edit_hostname, edit_wifi, do_upgrade, show_info, None]
+    actions = [
+        edit_hostname,
+        edit_wifi,
+        edit_vitesse,
+        edit_cnxfin,
+        do_upgrade,
+        show_info,
+        do_reboot,
+    ]
 
     while True:
         ev = read_event()
@@ -1356,11 +1665,7 @@ def app_config():
                 update_row(selected, True)
 
             elif val == KEY_ENVOI:
-                if selected == 4:
-                    # Redémarrer
-                    status("Redemarrage...", bg=ROUGE, fg=BLANC, delay=1.0)
-                    sys_run("reboot")
-                elif actions[selected]:
+                if actions[selected]:
                     actions[selected]()
                     draw_static()
                     for i in range(len(options)):
@@ -1369,34 +1674,38 @@ def app_config():
             elif val == KEY_SOMMAIRE:
                 break
 
+
 #  Menu principal.
 
 _MENU_ITEMS = [
-    ('1', 'Terminal shell',  app_shell),
-    ('2', 'WebSocket',       app_websocket),
-    ('3', 'Configuration',   app_config),
+    ("1", "Terminal shell", app_shell),
+    ("2", "WebSocket", app_websocket),
+    ("3", "Configuration", app_config),
 ]
+
 
 def _draw_menu_item(i: int, selected: bool):
     """Retracer une seule option."""
     key, label, _ = _MENU_ITEMS[i]
     l = 5 + i * 3
-    textbg(l,     1, ' ' * WIDTH, NOIR, BLANC)
+    textbg(l, 1, " " * WIDTH, NOIR, BLANC)
     if selected:
-        textbg(l + 1, 1, f'   > {key}. {label}'.ljust(WIDTH), CYAN, JAUNE)
+        textbg(l + 1, 1, f"   > {key}. {label}".ljust(WIDTH), CYAN, JAUNE)
     else:
-        textbg(l + 1, 1, f'     {key}. {label}'.ljust(WIDTH), NOIR, BLANC)
+        textbg(l + 1, 1, f"     {key}. {label}".ljust(WIDTH), NOIR, BLANC)
 
 
 def draw_menu(selected: int):
-    """Retracage complet."""
+    """Traçage complet."""
+    disable_local_echo()
+    eol(0)
     clear()
-    header(f'{APP_NAME} v{APP_VERSION}', bg=BLEU, fg=BLANC)
-    info = f'{get_hostname()}  {get_ip()}  up {get_uptime()}'
+    header(f"{APP_NAME} v{APP_VERSION}", bg=BLEU, fg=BLANC)
+    info = f"{get_hostname()}  {get_ip()}  up {get_uptime()}"
     textbg(2, 1, info[:WIDTH].ljust(WIDTH), BLEU, CYAN)
     for i in range(len(_MENU_ITEMS)):
         _draw_menu_item(i, i == selected)
-    footer('SUITE/RETOUR: nav  ENVOI: lancer', bg=BLEU, fg=BLANC)
+    footer("SUITE/RETOUR: nav  ENVOI: lancer", bg=BLEU, fg=BLANC)
     cursor(False)
 
 
@@ -1405,18 +1714,19 @@ def disable_local_echo():
     Désactiver l'echo local:
     ESC 0x3B (PRO3) + 0x60 (P_OFF) + 0x5A (MODEM_RX) + 0x51 (CLAVIER_TX)
     """
-    ser.write(b'\x1b\x3b\x60\x5a\x51')
+    ser.write(b"\x1b\x3b\x60\x5a\x51")
     time.sleep(0.1)
 
-def background_init():
-    """Envoyer toutes les 5 secondes les commandes d'initialisations."""
-    while True:
-        disable_local_echo()
-
-        time.sleep(5)
 
 def main():
     """Menu principal"""
+    cfg = load_config()
+
+    saved_baud = int(cfg.get("BAUDRATE", "1200"))
+
+    if saved_baud != 1200:
+        if not set_baudrate(saved_baud):
+            ser.baudrate = 1200
     selected = 0
     draw_menu(selected)
 
@@ -1454,6 +1764,7 @@ def main():
                     fn()
                     draw_menu(selected)
                     break
+
 
 def fatal_error(titre: str, erreur: str, description: str, actions: list):
     """
@@ -1534,12 +1845,10 @@ def fatal_error(titre: str, erreur: str, description: str, actions: list):
                 return "Retour au menu principal"
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     action = None
 
     try:
-        t = threading.Thread(target=background_init, daemon=True)
-        t.start()
         main()
 
     except (KeyboardInterrupt, SystemExit):
@@ -1553,47 +1862,19 @@ if __name__ == '__main__':
             "ERREUR FATALE",
             "Mémoire insuffisante.",
             str(e),
-            ["Redémarrer le système", "Redémarrer le script", "Retour au menu principal"]
+            [
+                "Redémarrer le système",
+                "Redémarrer le script",
+                "Retour au menu principal",
+            ],
         )
 
-    except SyntaxError as e:
+    except (AttributeError, ValueError, TypeError, NameError, SyntaxError) as e:
         action = fatal_error(
             "ERREUR FATALE",
-            "Erreur interne, signalez ce bug au dev. (SyntaxError)",
+            f"Erreur interne, signalez ce bug au dev. ({type(e).__name__})",
             str(e),
-            ["Redémarrer le script", "Retour au menu principal"]
-        )
-
-    except NameError as e:
-        action = fatal_error(
-            "ERREUR FATALE",
-            "Erreur interne, signalez ce bug au dev. (NameError)",
-            str(e),
-            ["Redémarrer le script", "Retour au menu principal"]
-        )
-
-    except TypeError as e:
-        action = fatal_error(
-            "ERREUR FATALE",
-            "Erreur interne, signalez ce bug au dev. (TypeError)",
-            str(e),
-            ["Redémarrer le script", "Retour au menu principal"]
-        )
-
-    except ValueError as e:
-        action = fatal_error(
-            "ERREUR FATALE",
-            "Erreur interne, signalez ce bug au dev. (ValueError)",
-            str(e),
-            ["Redémarrer le script", "Retour au menu principal"]
-        )
-
-    except AttributeError as e:
-        action = fatal_error(
-            "ERREUR FATALE",
-            "Erreur interne, signalez ce bug au dev. (AttributeError)",
-            str(e),
-            ["Redémarrer le script", "Retour au menu principal"]
+            ["Redémarrer le script", "Retour au menu principal"],
         )
 
     except (OSError, ConnectionError, TimeoutError, PermissionError) as e:
@@ -1601,7 +1882,7 @@ if __name__ == '__main__':
             "ERREUR SYSTEME",
             type(e).__name__,
             str(e),
-            ["Continuer", "Retour menu principal"]
+            ["Retour menu principal"],
         )
 
     # Actions.
@@ -1610,10 +1891,6 @@ if __name__ == '__main__':
 
     elif action == "Redémarrer le script":
         os.execv(sys.executable, [sys.executable] + sys.argv)
-
-    elif action == "Continuer":
-        #TODO: Faire que ça continue au lieu de retourner au menu principal.
-        main()
 
     elif action == "Retour au menu principal":
         main()
