@@ -113,8 +113,9 @@ def set_baudrate(new_baud: int) -> bool:
     ser.baudrate = old_baud
     return False
 
-# Identification 
-def read_minitel_rom_info(timeout=0.2):
+
+# Identification
+def read_minitel_rom_info(timeout=0.8):
     """
     Tente de lire l'identification ROM du Minitel via ENQROM.
     Retourne un tuple (raw_bytes, texte) ou (None, None) si pas de réponse.
@@ -149,7 +150,8 @@ def read_minitel_rom_info(timeout=0.2):
         text = ""
 
     return data, text
-    
+
+
 def decode_minitel_rom(code: str):
     """
     Decode des chaînes type 'Bv9'
@@ -175,7 +177,7 @@ def decode_minitel_rom(code: str):
         "w": "Minitel 10B",
         "v": "Minitel 2",
         "z": "Minitel 12",
-        "y": "Minitel 5"
+        "y": "Minitel 5",
     }
 
     fab = fabricant_map.get(code[0], f"Inconnu ({code[0]})")
@@ -1183,8 +1185,35 @@ def app_config():
         pos(8, 3)
         send("Nouveau (ENVOI pour valider) :")
         new = text_input(10, 3, 30)
+        if not new:
+            return False
+        
+        new_host = new.strip()
+        
         if new:
-            sys_run(f"hostnamectl set-hostname {new.strip()}")
+            sys_run(f"hostnamectl set-hostname {new_host}")
+            try:
+
+                with open("/etc/hosts", "r", encoding="utf-8") as f:
+                    hosts = f.read()
+
+                # Remplacer toute ligne 127.0.1.1
+                hosts = re.sub(
+                    r"^127\.0\.1\.1\s+.*$",
+                    f"127.0.1.1\t{new_host}",
+                    hosts,
+                    flags=re.MULTILINE,
+                )
+
+                # Si aucune ligne n'existe
+                if "127.0.1.1" not in hosts:
+                    hosts += f"\n127.0.1.1\t{new_host}\n"
+
+                with open("/etc/hosts", "w", encoding="utf-8") as f:
+                    f.write(hosts)
+
+            except Exception:
+                pass
             cfg["HOSTNAME"] = new.strip()
             save_config(cfg)
             status("Nom d'hôte mis a jour !", delay=1.5)
@@ -1407,9 +1436,9 @@ def app_config():
             if len(mem_cols) > 1
             else "?"
         )
-        
+
         # Infos Minitel (ENQROM)
-        
+
         raw, text = read_minitel_rom_info()
 
         if not raw:
@@ -1430,7 +1459,7 @@ def app_config():
                     minitel = code
             else:
                 # fallback brut
-                minitel = text[:WIDTH - 12]
+                minitel = text[: WIDTH - 12]
 
         infos = [
             ("Minitel", minitel),
