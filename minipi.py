@@ -1668,6 +1668,7 @@ def _draw_menu_item(i: int, selected: bool):
 
 def draw_menu(selected: int):
     """Traçage complet."""
+    disable_local_echo()
     eol(0)
     clear()
     header(f"{APP_NAME} v{APP_VERSION}", bg=BLEU, fg=BLANC)
@@ -1698,7 +1699,6 @@ def main():
         if not set_baudrate(saved_baud):
             ser.baudrate = 1200
     selected = 0
-    disable_local_echo()
     draw_menu(selected)
 
     while True:
